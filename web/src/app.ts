@@ -24,18 +24,67 @@ const errorBar = $<HTMLDivElement>("errorBar");
 let currentTrackId = "";
 
 // --- ошибки ---
+//
+// Одна строка разметки (#errorBar), два разных источника с разной жизнью:
+//
+// - showTransientError — ОШИБКА-СОБЫТИЕ (неуспешный разовый api()-вызов).
+//   Пользователь увидел, за него всё равно ответит следующее действие —
+//   поэтому автоскрытие через несколько секунд уместно.
+// - setStateError / setFailureError — ОШИБКА-СОСТОЯНИЕ (State.error из SSE
+//   и сообщение о пределе неудач воспроизведения соответственно). Это не
+//   событие, а описание текущего положения дел, которое остаётся верным,
+//   пока его явно не снимут: SSE-кадры идут по изменению состояния, а не
+//   периодически, так что для "устойчивой" ошибки никто не пришлёт её
+//   заново, и таймер, стирающий её через 4с, вернёт пользователя в то самое
+//   молчаливо сломанное состояние, ради избежания которого её вообще
+//   показывали. Отдельные слоты для двух устойчивых источников — потому
+//   что у них разные условия снятия (новый кадр без error / событие
+//   "playing"), и один частый источник (SSE-кадр по другому поводу) не
+//   должен затирать сообщение другого.
+//
+// Разовая ошибка может временно перекрыть устойчивую — после её
+// автоскрытия строка возвращается к устойчивой, если та ещё в силе.
 
-let errorTimer: number | undefined;
+let stickyStateError = "";
+let stickyFailureError = "";
+let transientHideTimer: number | undefined;
 
-// Единственное место, показывающее ошибку человеку: и неуспешные ответы
-// api(), и State.error из SSE ведут сюда, чтобы пользователь не смотрел на
-// молчащий интерфейс, не понимая, почему ничего не произошло.
-function showError(message: string): void {
+function currentSticky(): string {
+  // Сообщение о пределе неудач актуальнее: оно объясняет, почему плеер
+  // молчит прямо сейчас, даже если параллельно пришёл кадр SSE без error.
+  return stickyFailureError || stickyStateError;
+}
+
+function paintErrorBar(): void {
+  if (transientHideTimer !== undefined) return; // разовая ошибка ещё на экране — не мешаем её таймеру
+  const msg = currentSticky();
+  if (msg) {
+    errorBar.textContent = msg;
+    errorBar.classList.remove("hidden");
+  } else {
+    errorBar.classList.add("hidden");
+  }
+}
+
+function showTransientError(message: string): void {
   if (!message) return;
-  window.clearTimeout(errorTimer);
+  window.clearTimeout(transientHideTimer);
   errorBar.textContent = message;
   errorBar.classList.remove("hidden");
-  errorTimer = window.setTimeout(() => errorBar.classList.add("hidden"), 4000);
+  transientHideTimer = window.setTimeout(() => {
+    transientHideTimer = undefined;
+    paintErrorBar();
+  }, 4000);
+}
+
+function setStateError(message: string): void {
+  stickyStateError = message;
+  paintErrorBar();
+}
+
+function setFailureError(message: string): void {
+  stickyFailureError = message;
+  paintErrorBar();
 }
 
 async function api(path: string, body?: unknown): Promise<any> {
@@ -46,7 +95,7 @@ async function api(path: string, body?: unknown): Promise<any> {
   });
   if (!res.ok) {
     const text = await res.text();
-    showError(text);
+    showTransientError(text);
     throw new Error(text);
   }
   return res.status === 204 ? null : res.json();
@@ -91,7 +140,9 @@ function render(st: State): void {
 
   // st.error показываем независимо от того, есть трек или нет — ошибка
   // источника (например, отсутствие Плюса) не обязана ждать пустого трека.
-  if (st.error) showError(st.error);
+  // Устойчивая ошибка, а не разовая: держится, пока кадр её несёт, и
+  // снимается ровно тем кадром, где error снова пуст.
+  setStateError(st.error ?? "");
 
   listEl.innerHTML = "";
   st.queue.forEach((track, i) => {
@@ -124,7 +175,9 @@ function updateMediaSession(t: Track): void {
     album: t.album,
     artwork: t.coverUrl ? [{ src: t.coverUrl, sizes: "400x400", type: "image/jpeg" }] : [],
   });
-  navigator.mediaSession.setActionHandler("play", () => { audio.play(); api("/api/player/resume").catch(() => {}); });
+  // play() может штатно отклониться (политика браузера, src ещё не готов) —
+  // молчим: то же самое отражает следующий кадр SSE, и рассинхрона не будет.
+  navigator.mediaSession.setActionHandler("play", () => { audio.play().catch(() => {}); api("/api/player/resume").catch(() => {}); });
   navigator.mediaSession.setActionHandler("pause", () => { audio.pause(); api("/api/player/pause").catch(() => {}); });
   navigator.mediaSession.setActionHandler("nexttrack", () => { api("/api/player/next").catch(() => {}); });
   navigator.mediaSession.setActionHandler("previoustrack", () => { api("/api/player/prev").catch(() => {}); });
@@ -167,7 +220,8 @@ $("btnNext").addEventListener("click", () => { api("/api/player/next").catch(() 
 $("btnPrev").addEventListener("click", () => { api("/api/player/prev").catch(() => {}); });
 
 $("btnPlay").addEventListener("click", () => {
-  if (audio.paused) { audio.play(); api("/api/player/resume").catch(() => {}); }
+  // play() может штатно отклониться — молчим, как и в render()/MediaSession.
+  if (audio.paused) { audio.play().catch(() => {}); api("/api/player/resume").catch(() => {}); }
   else { audio.pause(); api("/api/player/pause").catch(() => {}); }
 });
 
@@ -238,7 +292,13 @@ setInterval(() => {
 // на максимальной скорости.
 let consecutiveFailures = 0;
 
-audio.addEventListener("playing", () => { consecutiveFailures = 0; });
+// Успешный старт снимает и счётчик, и устойчивое сообщение о пределе —
+// оба описывают одно и то же условие ("воспроизведение не идёт"), и оба
+// снимаются одним и тем же событием, которое доказывает, что оно снято.
+audio.addEventListener("playing", () => {
+  consecutiveFailures = 0;
+  setFailureError("");
+});
 
 audio.addEventListener("ended", () => { api("/api/player/next").catch(() => {}); });
 
@@ -248,7 +308,7 @@ audio.addEventListener("error", () => {
   if (!currentTrackId) return;
   consecutiveFailures++;
   if (consecutiveFailures >= 3) {
-    showError("Не удаётся воспроизвести. Проверьте подписку и токен.");
+    setFailureError("Не удаётся воспроизвести. Проверьте подписку и токен.");
     return;
   }
   api("/api/player/next").catch(() => {});
