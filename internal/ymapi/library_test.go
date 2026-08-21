@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 )
 
@@ -94,17 +95,23 @@ func TestPlaylistTracksUnwrapsNesting(t *testing.T) {
 }
 
 // «Мне нравится» отдаёт только идентификаторы — метаданные добираются отдельно.
-// Проверяются оба запроса: путь и метод лайков, и метод/путь запроса метаданных —
-// смысл теста в том, что вызовов ровно два и они разные.
+// Проверяются оба запроса: путь и метод лайков, и метод/путь запроса метаданных,
+// а также то, что каждый из них выполнен ровно по одному разу — смысл теста
+// в том, что вызовов ровно два и они разные, а не только что оба пути где-то
+// встретились. Счётчики раздельные по путям и атомарные: httptest.Server
+// обслуживает запросы в отдельных горутинах.
 func TestLikedTracksResolvesMetadata(t *testing.T) {
+	var likesCalls, tracksCalls atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/tracks" {
+			tracksCalls.Add(1)
 			if r.Method != http.MethodPost {
 				t.Errorf("method = %s, want POST для /tracks", r.Method)
 			}
 			w.Write([]byte(tracksFixture))
 			return
 		}
+		likesCalls.Add(1)
 		if r.URL.Path != "/users/555/likes/tracks" {
 			t.Errorf("path = %q, want /users/555/likes/tracks", r.URL.Path)
 		}
@@ -118,6 +125,12 @@ func TestLikedTracksResolvesMetadata(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].ID != "12345" {
 		t.Fatalf("лайки = %+v", got)
+	}
+	if likesCalls.Load() != 1 {
+		t.Fatalf("обращений за лайками = %d, want 1", likesCalls.Load())
+	}
+	if tracksCalls.Load() != 1 {
+		t.Fatalf("обращений за метаданными = %d, want 1", tracksCalls.Load())
 	}
 }
 
