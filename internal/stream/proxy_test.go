@@ -236,6 +236,17 @@ func TestProxyRecoversFromLeaderPanic(t *testing.T) {
 	res := &panicOnceResolver{entered: make(chan struct{}), release: make(chan struct{})}
 	p := NewProxy(res, NewBuffer(1024), http.DefaultClient)
 
+	// Вместо time.Sleep — детерминированный сигнал через тестовый хук:
+	// резолвер паникует только после того, как ожидающий фактически лёг на
+	// <-pf.done. На загруженной машине time.Sleep(20ms) не гарантирует
+	// этого: ожидающий может дойти до fetchOnce уже после того, как лидер
+	// запаниковал и снял свою запись из pending, — тогда он сам станет
+	// новым лидером и резолвер будет вызван третий раз.
+	var parkOnce sync.Once
+	p.hookWaiterParked = func(trackID string) {
+		parkOnce.Do(func() { close(res.release) })
+	}
+
 	leaderDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
 		rec := httptest.NewRecorder()
@@ -255,9 +266,6 @@ func TestProxyRecoversFromLeaderPanic(t *testing.T) {
 		p.ServeTrack(rec, httptest.NewRequest(http.MethodGet, "/stream/1", nil), "1")
 		waiterDone <- rec
 	}()
-
-	time.Sleep(20 * time.Millisecond) // дать ожидающему подписаться на pending
-	close(res.release)                // резолвер паникует
 
 	checks := []struct {
 		name string
@@ -340,6 +348,18 @@ func TestProxyLeaderCancellationDoesNotAffectWaiters(t *testing.T) {
 
 	p := NewProxy(&fakeResolver{url: origin.URL}, NewBuffer(1024), origin.Client())
 
+	// parked фиксирует факт, что ожидающий действительно прошёл через
+	// запись лидера в pending (а не, скажем, обслужился прямиком из буфера,
+	// ни разу не коснувшись проверяемого механизма). Тот же хук заменяет
+	// time.Sleep перед close(release): источник открывается только после
+	// того, как ожидающий фактически подписался, а не «наверное, успел».
+	parked := make(chan string, 1)
+	var parkOnce sync.Once
+	p.hookWaiterParked = func(trackID string) {
+		parked <- trackID
+		parkOnce.Do(func() { close(release) })
+	}
+
 	leaderCtx, cancelLeader := context.WithCancel(context.Background())
 	cancelLeader() // контекст лидера уже отменён к моменту запроса
 
@@ -365,8 +385,14 @@ func TestProxyLeaderCancellationDoesNotAffectWaiters(t *testing.T) {
 		waiterDone <- rec
 	}()
 
-	time.Sleep(20 * time.Millisecond) // дать ожидающему подписаться на pending
-	close(release)
+	select {
+	case id := <-parked:
+		if id != "1" {
+			t.Fatalf("хук вызван для трека %q, want \"1\"", id)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ожидающий не был зафиксирован как подписавшийся на pending-запись лидера — тест не проверяет то, ради чего написан")
+	}
 
 	select {
 	case rec := <-waiterDone:

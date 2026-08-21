@@ -46,6 +46,14 @@ type Proxy struct {
 
 	mu      sync.Mutex
 	pending map[string]*pendingFetch
+
+	// hookWaiterParked, если задан, вызывается непосредственно перед тем,
+	// как ожидающий запрос ложится на <-pf.done чужой загрузки. Это
+	// тестовый шов, а не часть публичного контракта: он существует только
+	// затем, чтобы тесты могли синхронизироваться на факте подписки на
+	// чужую загрузку, а не на таймере (time.Sleep), который на загруженной
+	// машине ничего не гарантирует. В продакшене всегда nil.
+	hookWaiterParked func(trackID string)
 }
 
 // NewProxy собирает прокси. hc может быть nil — тогда берётся клиент по умолчанию.
@@ -115,6 +123,9 @@ func (p *Proxy) fetchOnce(ctx context.Context, trackID string) (data []byte, err
 	}
 	if pf, ok := p.pending[trackID]; ok {
 		p.mu.Unlock()
+		if p.hookWaiterParked != nil {
+			p.hookWaiterParked(trackID)
+		}
 		<-pf.done
 		return pf.data, pf.err
 	}
