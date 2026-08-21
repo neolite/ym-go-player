@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"music212/internal/player"
 	"music212/internal/stream"
@@ -447,7 +449,27 @@ func (a *App) retainBuffer() {
 	a.Buffer.Retain(keep...)
 }
 
-// refillWave подкачивает следующий батч ротора, когда очередь подходит к концу.
+// refillWaveBackoff задаёт паузы между повторными попытками подкачки
+// батча ротора после первой неудачи. Переменная пакета, а не константа:
+// тесты подменяют её на короткие паузы, чтобы не ждать реальное время —
+// сама retry-логика (число попыток, нарастание пауз) при этом не меняется.
+var refillWaveBackoff = []time.Duration{500 * time.Millisecond, 2 * time.Second}
+
+// refillWaveWarning — текст предупреждения, которое видит пользователь,
+// пока идут повторы. Вынесен в переменную, а не встроен в вызовы: и
+// setWarning, и последующий clearWarning обязаны сверяться с ОДНИМ и тем
+// же текстом (см. clearWarning).
+const refillWaveWarning = "не удалось подгрузить продолжение «Моей волны» — повторяем попытку"
+
+// refillWave подкачивает следующий батч ротора, когда очередь подходит к
+// концу. Раньше (находка 5) сбой здесь был полностью молчаливым: ни лога,
+// ни State.Error, ни повтора — очередь на слабой сети тихо доигрывала до
+// конца и останавливалась без единого объяснения. Первая попытка
+// синхронная и не меняет задержку ответа обработчика в happy path; если
+// она не удалась — предупреждение уходит в State.Error немедленно (а не
+// после исчерпания повторов, которое может занять секунды), а сами
+// повторы с нарастающей паузой идут в фоне через goSafe и не задерживают
+// ответ handleNext/handlePlay пользователю.
 func (a *App) refillWave(ctx context.Context) {
 	_, _, source := a.Queue.Snapshot()
 	if source != "wave" || a.Queue.Remaining() >= 2 {
@@ -463,13 +485,71 @@ func (a *App) refillWave(ctx context.Context) {
 		last = cur.ID
 	}
 	batch, err := c.StationTracks(ctx, ymapi.WaveStationID, last)
-	if err != nil || batch == nil {
+	if err == nil && batch != nil {
+		a.mu.Lock()
+		a.batchID = batch.BatchID
+		a.mu.Unlock()
+		a.Queue.Append(batch.Tracks)
 		return
 	}
+	log.Printf("ротор: подкачка батча волны не удалась: %v", err)
+	a.setWarning(refillWaveWarning)
+	a.retryRefillWave(c, last)
+}
+
+// retryRefillWave — фоновые повторы подкачки батча после первой неудачи в
+// refillWave. refillWaveBackoff задаёт жёсткий предел числа попыток — не
+// бесконечный цикл: по его исчерпании предупреждение остаётся в
+// State.Error до следующего успешного refillWave. Успех дозаливает батч
+// в очередь и снимает именно это предупреждение (clearWarning).
+func (a *App) retryRefillWave(c *ymapi.Client, lastTrackID string) {
+	goSafe("ротор: повтор подкачки батча волны", func() error {
+		var err error
+		for _, pause := range refillWaveBackoff {
+			<-time.After(pause)
+			var batch *ymapi.WaveBatch
+			batch, err = c.StationTracks(context.Background(), ymapi.WaveStationID, lastTrackID)
+			if err == nil && batch != nil {
+				a.mu.Lock()
+				a.batchID = batch.BatchID
+				a.mu.Unlock()
+				a.Queue.Append(batch.Tracks)
+				a.clearWarning(refillWaveWarning)
+				return nil
+			}
+		}
+		if err == nil {
+			err = errors.New("ротор вернул пустой батч")
+		}
+		return fmt.Errorf("не удалось подкачать батч волны после %d повторов: %w", len(refillWaveBackoff), err)
+	})
+}
+
+// setWarning выставляет предупреждение в State.Error, не трогая status:
+// воспроизведение оставшихся треков продолжается — это не полный отказ
+// (в отличие от setStatus, который переключает оба поля разом).
+func (a *App) setWarning(msg string) {
 	a.mu.Lock()
-	a.batchID = batch.BatchID
+	a.errText = msg
 	a.mu.Unlock()
-	a.Queue.Append(batch.Tracks)
+	a.publish()
+}
+
+// clearWarning снимает предупреждение, только если errText всё ещё равен
+// именно тому тексту, который сама и выставила. Сравнение по точному
+// значению, а не безусловный сброс в "": пока шли фоновые повторы, другой
+// код мог успеть заменить errText на настоящую ошибку воспроизведения —
+// затирать её результатом устаревшего повтора нельзя.
+func (a *App) clearWarning(expect string) {
+	a.mu.Lock()
+	changed := a.errText == expect
+	if changed {
+		a.errText = ""
+	}
+	a.mu.Unlock()
+	if changed {
+		a.publish()
+	}
 }
 
 // resetPosition обнуляет накопленную позицию воспроизведения. Обязана
