@@ -1,0 +1,12 @@
+{
+  "name": "music212-web",
+  "private": true,
+  "scripts": {
+    "build": "esbuild src/app.ts --bundle --minify --outfile=../internal/httpapi/dist/app.js && cp index.html ../internal/httpapi/dist/index.html",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "typescript": "^5.7.0"
+  }
+}

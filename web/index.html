@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Плеер</title>
+  <style>
+    :root { --bg:#111; --fg:#eee; --dim:#888; --accent:#ffcc00; --err-bg:#4a1a1a; --err-fg:#ffdcdc; }
+    @media (prefers-color-scheme: light) { :root { --bg:#fafafa; --fg:#111; --dim:#666; --err-bg:#ffe0e0; --err-fg:#7a1010; } }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, sans-serif; }
+    header { display:flex; gap:8px; padding:12px; border-bottom:1px solid #3333; }
+    button { background:none; border:1px solid #6666; color:inherit; border-radius:6px;
+             padding:6px 12px; cursor:pointer; font:inherit; }
+    button:hover { border-color: var(--accent); }
+    main { padding:16px; }
+    #errorBar { padding:8px 16px; background:var(--err-bg); color:var(--err-fg); font-size:14px; }
+    #now { display:flex; gap:16px; align-items:center; margin-bottom:16px; }
+    #cover { width:96px; height:96px; border-radius:8px; background:#3333; object-fit:cover; }
+    #title { font-weight:600; }
+    #artist { color:var(--dim); }
+    #progress { width:100%; }
+    ul { list-style:none; padding:0; margin:0; }
+    li { padding:8px; border-radius:6px; cursor:pointer; }
+    li:hover { background:#8881; }
+    li.current { color:var(--accent); }
+    #auth { padding:24px; max-width:560px; }
+    input { width:100%; padding:8px; font:inherit; background:#8881;
+            border:1px solid #6666; border-radius:6px; color:inherit; }
+    .hidden { display:none; }
+  </style>
+</head>
+<body>
+  <div id="auth" class="hidden">
+    <h2>Нужен токен</h2>
+    <p>Откройте <a id="authLink" target="_blank" rel="noopener">страницу входа Яндекса</a>,
+       войдите и скопируйте значение <code>access_token</code> из адресной строки.</p>
+    <input id="tokenInput" placeholder="Вставьте токен сюда" autocomplete="off">
+    <p><button id="tokenSave">Сохранить</button> <span id="authMsg"></span></p>
+  </div>
+
+  <div id="app" class="hidden">
+    <header>
+      <button id="btnWave">Моя волна</button>
+      <button id="btnLikes">Мне нравится</button>
+      <button id="btnLists">Плейлисты</button>
+      <input id="search" placeholder="Поиск" style="max-width:240px">
+    </header>
+    <div id="errorBar" class="hidden" role="alert"></div>
+    <main>
+      <section id="now">
+        <img id="cover" alt="">
+        <div style="flex:1">
+          <div id="title">—</div>
+          <div id="artist"></div>
+          <input id="progress" type="range" min="0" max="100" value="0" step="0.1">
+          <div>
+            <button id="btnPrev">◀◀</button>
+            <button id="btnPlay">▶</button>
+            <button id="btnNext">▶▶</button>
+            <input id="volume" type="range" min="0" max="1" step="0.01" value="1" style="width:100px">
+          </div>
+        </div>
+      </section>
+      <ul id="list"></ul>
+    </main>
+  </div>
+
+  <audio id="audio"></audio>
+  <script src="./app.js"></script>
+</body>
+</html>
