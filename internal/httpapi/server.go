@@ -35,11 +35,17 @@ type Server struct {
 	shuttingDown *atomic.Bool
 }
 
-// New создаёт сервер с заданным роутером. Порт выбирается при Start.
-func New(mux *http.ServeMux) *Server {
+// New создаёт сервер с заданным обработчиком. Порт выбирается при Start.
+//
+// Принимает http.Handler, а не конкретно *http.ServeMux: задача 14 должна
+// иметь возможность обернуть собранный роутер в OriginGuard (задача 12),
+// которая возвращает http.Handler, а не *http.ServeMux. *http.ServeMux сам
+// реализует http.Handler, так что вызовы New(mux) без обёртки остаются
+// валидными.
+func New(handler http.Handler) *Server {
 	return &Server{
 		http: &http.Server{
-			Handler:           mux,
+			Handler:           handler,
 			ReadHeaderTimeout: 5 * time.Second,
 		},
 		errc: make(chan error, 1),
