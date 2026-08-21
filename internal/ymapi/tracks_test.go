@@ -167,9 +167,11 @@ func TestResolveDirectLinkUsesMetadataClient(t *testing.T) {
 }
 
 // TestResolveDirectLinkRejectsIncompleteXML закрепляет guard на tracks.go:127:
-// SignMP3 безусловно режет path[1:], поэтому пустой path без проверки даёт
-// панику среза. Локальные XML-строки — намеренно не downloadXMLFixture, чтобы
-// не трогать константу, на которую опираются тесты будущих задач.
+// без host/path DirectLinkMP3 соберёт синтаксически валидную, но бессмысленную
+// ссылку, и запрос по ней упадёт позже, где исходную причину не восстановить
+// (паники здесь нет — SignMP3 сама устойчива к пустому path). Локальные
+// XML-строки — намеренно не downloadXMLFixture, чтобы не трогать константу,
+// на которую опираются тесты будущих задач.
 func TestResolveDirectLinkRejectsIncompleteXML(t *testing.T) {
 	cases := []struct {
 		name string

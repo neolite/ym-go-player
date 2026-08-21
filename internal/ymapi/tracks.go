@@ -122,8 +122,10 @@ func (c *Client) ResolveDirectLink(ctx context.Context, v DownloadVariant) (stri
 	if err := xml.Unmarshal(body, &info); err != nil {
 		return "", fmt.Errorf("разбор download-info XML: %w", err)
 	}
-	// SignMP3 безусловно отбрасывает первый символ path — если path пуст,
-	// это приведёт к панике среза внутри SignMP3. Проверяем заранее.
+	// Без host/path DirectLinkMP3 соберёт синтаксически валидную, но
+	// бессмысленную ссылку (например, "https:///get-mp3/..."), и запрос по
+	// ней упадёт позже, где исходную причину уже не восстановить. Проверяем
+	// заранее и отказываем честной ошибкой.
 	if info.Host == "" || info.Path == "" {
 		return "", errors.New("download-info XML не содержит host/path")
 	}
