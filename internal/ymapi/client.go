@@ -47,14 +47,22 @@ func New(token string) *Client { return NewWithBase(token, DefaultBaseURL) }
 
 // NewWithBase позволяет подменить адрес — используется в тестах.
 func NewWithBase(token, base string) *Client {
+	// Транспорт для stream клонируется из http.DefaultTransport, а не
+	// собирается голым литералом &http.Transport{...}: у голого литерала
+	// нет Proxy (значит, за обязательным корпоративным HTTP(S)_PROXY
+	// скачивание трека молча не соединяется, тогда как c.http его
+	// уважает — расхождение почти невозможно связать с настройкой прокси
+	// по симптому), нет ForceAttemptHTTP2 и нет пула соединений
+	// DefaultTransport. Clone() возвращает независимую копию — правка
+	// её полей ниже не затрагивает сам http.DefaultTransport.
+	streamTransport := http.DefaultTransport.(*http.Transport).Clone()
+	streamTransport.ResponseHeaderTimeout = 20 * time.Second
 	return &Client{
 		token: token,
 		base:  strings.TrimRight(base, "/"),
 		http:  &http.Client{Timeout: 20 * time.Second},
 		stream: &http.Client{
-			Transport: &http.Transport{
-				ResponseHeaderTimeout: 20 * time.Second,
-			},
+			Transport: streamTransport,
 		},
 	}
 }

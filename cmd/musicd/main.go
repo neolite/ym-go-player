@@ -59,11 +59,19 @@ func main() {
 	// (ResponseHeaderTimeout): зависший источник не держит нас вечно.
 	// Верхнюю границу самой загрузки задаёт leaderTimeout прокси (задача
 	// 8, internal/stream/proxy.go), а не таймаут этого клиента.
-	streamClient := &http.Client{
-		Transport: &http.Transport{
-			ResponseHeaderTimeout: 20 * time.Second,
-		},
-	}
+	//
+	// Транспорт клонируется из http.DefaultTransport, а не собирается
+	// голым литералом &http.Transport{...}: у голого литерала нет Proxy —
+	// за обязательным корпоративным HTTP(S)_PROXY вход и метаданные
+	// работали бы (клиент метаданных получает готовый http.DefaultTransport
+	// через ymapi.New), а скачивание каждого трека молча не соединялось
+	// бы, и симптом «всё вроде работает, а музыка не играет» почти
+	// невозможно связать с настройкой прокси. Clone() возвращает
+	// независимую копию — правка её полей ниже не трогает сам
+	// http.DefaultTransport.
+	streamTransport := http.DefaultTransport.(*http.Transport).Clone()
+	streamTransport.ResponseHeaderTimeout = 20 * time.Second
+	streamClient := &http.Client{Transport: streamTransport}
 	app.Proxy = stream.NewProxy(resolverFunc(newClient), buffer, streamClient)
 
 	mux := app.Routes()
@@ -130,6 +138,12 @@ func (f resolverFunc) ResolveTrack(ctx context.Context, trackID string) (string,
 // openBrowser открывает адрес демона в браузере по умолчанию. Неудача не
 // фатальна: адрес уже напечатан в терминале и его можно открыть вручную —
 // вызывающая сторона логирует ошибку и на этом успокаивается.
+//
+// Wait() дожидается завершения потомка в отдельной горутине, а не в этой
+// функции: сам процесс open/xdg-open завершается почти сразу (он лишь
+// передаёт адрес уже запущенному браузеру), но без Wait() он остаётся
+// зомби на всё время жизни демона. Ошибку Wait() не логируем — открытый
+// браузер мог закрыться как угодно, это не повод для сообщения в лог.
 func openBrowser(url string) error {
 	var cmd string
 	switch runtime.GOOS {
@@ -140,5 +154,10 @@ func openBrowser(url string) error {
 	default:
 		cmd = "xdg-open"
 	}
-	return exec.Command(cmd, url).Start()
+	c := exec.Command(cmd, url)
+	if err := c.Start(); err != nil {
+		return err
+	}
+	go func() { _ = c.Wait() }()
+	return nil
 }
