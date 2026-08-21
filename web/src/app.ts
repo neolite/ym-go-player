@@ -103,6 +103,37 @@ async function api(path: string, body?: unknown): Promise<any> {
 
 // --- авторизация ---
 
+// После входа Яндекс кладёт токен в адресную строку вида
+// https://music.yandex.ru/#access_token=...&token_type=bearer&expires_in=...&cid=...
+// Естественное действие пользователя — скопировать её целиком (или только
+// хвост от access_token и дальше, если # не попал в буфер). Разбираем
+// текст, а не полагаемся на его форму: ищем "access_token" где угодно в
+// строке — во фрагменте, в хвосте без "#", неважно. Если разметки нет
+// вовсе, считаем, что ввели голый токен, и не трогаем его. Никогда не
+// бросает исключение и ничего не логирует — на мусоре просто возвращает
+// исходный текст, пусть сервер ответит своим сообщением.
+function extractToken(raw: string): string {
+  const text = raw.trim();
+  const marker = "access_token";
+  const idx = text.indexOf(marker);
+  if (idx === -1) return text;
+
+  const afterMarker = text.slice(idx + marker.length);
+  const eq = afterMarker.indexOf("=");
+  if (eq === -1) return text; // "access_token" нашёлся, но не как параметр — не гадаем
+
+  let value = afterMarker.slice(eq + 1);
+  const amp = value.indexOf("&");
+  if (amp !== -1) value = value.slice(0, amp);
+  if (!value) return text; // access_token= без значения — разобрать не вышло
+
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value; // некорректные %-последовательности — не падаем, берём как есть
+  }
+}
+
 async function checkAuth(): Promise<boolean> {
   const st = await (await fetch("/api/auth/status")).json();
   if (st.authorized) {
@@ -118,7 +149,7 @@ async function checkAuth(): Promise<boolean> {
 }
 
 $("tokenSave").addEventListener("click", async () => {
-  const token = ($("tokenInput") as HTMLInputElement).value.trim();
+  const token = extractToken(($("tokenInput") as HTMLInputElement).value);
   const res = await fetch("/api/auth/token", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
