@@ -290,3 +290,59 @@ func readStats(t *testing.T, ch chan url.Values) url.Values {
 		return nil
 	}
 }
+
+// --- находка 2: клик по треку в очереди не должен навсегда выключать
+// докачку батчей и фидбек волны.
+
+func TestHandleQueueIndexMovesWithoutChangingSource(t *testing.T) {
+	srv, feedback, _ := newRotorFakeBackend(t)
+	defer srv.Close()
+
+	app := waveApp(srv, []player.Track{{ID: "a"}, {ID: "b"}, {ID: "c"}})
+	mux := app.Routes()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/player/queue-index", strings.NewReader(`{"index":2}`))
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	var st player.State
+	if err := json.NewDecoder(rec.Body).Decode(&st); err != nil {
+		t.Fatalf("разбор ответа: %v", err)
+	}
+	if st.Source != "wave" {
+		t.Fatalf("Source = %q, want wave — клик по треку не должен выключать волну", st.Source)
+	}
+	if st.QueueIndex != 2 {
+		t.Fatalf("QueueIndex = %d, want 2", st.QueueIndex)
+	}
+	if st.Track == nil || st.Track.ID != "c" {
+		t.Fatalf("Track = %+v, want id=c", st.Track)
+	}
+
+	// trackStarted обязан уйти для нового текущего трека, как и после next/prev.
+	got := collectFeedbackTypes(t, feedback, 1)
+	if got["trackStarted"] != "c" {
+		t.Fatalf("trackStarted trackId = %q, want c; кадры = %v", got["trackStarted"], got)
+	}
+}
+
+func TestHandleQueueIndexOutOfRangeReturns400(t *testing.T) {
+	srv, _, _ := newRotorFakeBackend(t)
+	defer srv.Close()
+
+	app := waveApp(srv, []player.Track{{ID: "a"}, {ID: "b"}})
+	mux := app.Routes()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/player/queue-index", strings.NewReader(`{"index":9}`))
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code = %d, want 400", rec.Code)
+	}
+	if got := app.Queue.Current(); got == nil || got.ID != "a" {
+		t.Fatalf("после отказа текущий трек не должен меняться, Current = %v", got)
+	}
+}

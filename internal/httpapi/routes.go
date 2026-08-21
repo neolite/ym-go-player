@@ -46,6 +46,7 @@ func (a *App) Routes() *http.ServeMux {
 	mux.HandleFunc("POST /api/play", a.handlePlay)
 	mux.HandleFunc("POST /api/player/next", a.handleNext)
 	mux.HandleFunc("POST /api/player/prev", a.handlePrev)
+	mux.HandleFunc("POST /api/player/queue-index", a.handleQueueIndex)
 	mux.HandleFunc("POST /api/player/pause", a.handlePause)
 	mux.HandleFunc("POST /api/player/resume", a.handleResume)
 	mux.HandleFunc("POST /api/player/progress", a.handleProgress)
@@ -341,6 +342,40 @@ func (a *App) handlePrev(w http.ResponseWriter, r *http.Request) {
 		a.resetPosition()
 		a.reportTrackStarted()
 	}
+	a.retainBuffer()
+	a.setStatus(player.StatusLoading, "")
+	writeJSON(w, http.StatusOK, a.snapshot())
+}
+
+// handleQueueIndex переставляет позицию внутри УЖЕ играющей очереди по
+// клику на конкретный трек в списке (находка 2). До этого эндпоинта
+// единственным способом перейти внутри очереди было позвать
+// POST /api/play {"source":"tracks", "tracks":[...]}: это ставило НОВУЮ
+// очередь и меняло source на "tracks" — если играла волна, докачка
+// батчей (refillWave) и фидбек ротора (reportFinished) после этого
+// прекращались навсегда, потому что оба гейтятся на source == "wave".
+// Здесь очередь и её источник не меняются вовсе — двигается только
+// позиция, через player.Queue.SetIndex.
+//
+// Контракт: POST /api/player/queue-index, тело {"index": N} — N считается
+// от начала текущей очереди (Queue.Snapshot()[0], тот же массив, что уже
+// уходит в кадре SSE как State.Queue). 200 и снапшот состояния при
+// удачном переходе, 400 с телом {"error": "..."} — при некорректном или
+// нечитаемом теле, а также при индексе вне границ очереди.
+func (a *App) handleQueueIndex(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Index int `json:"index"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10)).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "не удалось прочитать запрос"})
+		return
+	}
+	if !a.Queue.SetIndex(body.Index) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "индекс вне очереди"})
+		return
+	}
+	a.resetPosition()
+	a.reportTrackStarted()
 	a.retainBuffer()
 	a.setStatus(player.StatusLoading, "")
 	writeJSON(w, http.StatusOK, a.snapshot())

@@ -83,6 +83,39 @@ func TestRemainingCountsTracksAfterCurrent(t *testing.T) {
 	}
 }
 
+// SetIndex — путь для клика по треку внутри уже играющей очереди
+// (находка 2): в отличие от Set, он не должен трогать source. Иначе клик
+// по треку волны навсегда выключает докачку батчей и фидбек ротора.
+func TestSetIndexMovesWithoutChangingSource(t *testing.T) {
+	q := NewQueue()
+	q.Set(tracks("a", "b", "c"), "wave")
+
+	if !q.SetIndex(2) {
+		t.Fatal("SetIndex(2) должен вернуть true — индекс в границах")
+	}
+	if got := q.Current(); got == nil || got.ID != "c" {
+		t.Fatalf("Current = %v, want c", got)
+	}
+	if _, _, src := q.Snapshot(); src != "wave" {
+		t.Fatalf("source = %q, want wave — SetIndex не должен его менять", src)
+	}
+}
+
+func TestSetIndexRejectsOutOfRange(t *testing.T) {
+	q := NewQueue()
+	q.Set(tracks("a", "b"), "wave")
+
+	if q.SetIndex(5) {
+		t.Fatal("SetIndex(5) должен вернуть false — индекс вне границ")
+	}
+	if q.SetIndex(-1) {
+		t.Fatal("SetIndex(-1) должен вернуть false — индекс вне границ")
+	}
+	if got := q.Current(); got == nil || got.ID != "a" {
+		t.Fatalf("после отказа SetIndex текущий трек не должен меняться, Current = %v", got)
+	}
+}
+
 func TestSnapshotReturnsSource(t *testing.T) {
 	q := NewQueue()
 	q.Set(tracks("a"), "wave")

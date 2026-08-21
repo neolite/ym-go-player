@@ -48,6 +48,24 @@ func normalizeTracks(tracks []Track) []Track {
 	return out
 }
 
+// SetIndex переставляет позицию на конкретный индекс уже существующей
+// очереди, не трогая её содержимое и источник. Это путь для клика по
+// треку в уже играющей очереди — в отличие от Set, который считается
+// постановкой НОВОЙ очереди (и поэтому меняет source). Раньше единственным
+// способом перейти внутри очереди было позвать Set(tracks, "tracks"), что
+// навсегда выключало докачку батчей ротора и его фидбек для волны (см.
+// refillWave/reportFinished в internal/httpapi/routes.go — оба гейтятся на
+// source == "wave"). false — индекс вне границ, позиция не изменена.
+func (q *Queue) SetIndex(i int) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if i < 0 || i >= len(q.tracks) {
+		return false
+	}
+	q.index = i
+	return true
+}
+
 // Current возвращает текущий трек либо nil, если очередь пуста.
 func (q *Queue) Current() *Track {
 	q.mu.RLock()
