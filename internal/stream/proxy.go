@@ -3,6 +3,7 @@ package stream
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -86,12 +87,32 @@ func (p *Proxy) ServeTrack(w http.ResponseWriter, req *http.Request, trackID str
 	http.ServeContent(w, req, trackID+".mp3", time.Time{}, bytes.NewReader(data))
 }
 
+// leaderTimeout — предельный срок самой загрузки трека, не привязанный к
+// контексту конкретного HTTP-запроса. <audio> в браузере типично открывает
+// поток, тут же обрывает первый запрос и переоткрывает его с Range — если
+// качать на контексте этого первого запроса, его отмена уронит загрузку для
+// всех, кто на неё подписался в fetchOnce, включая клиентов с живым
+// соединением. Поэтому лидер качает на context.WithoutCancel(ctx) с
+// собственным сроком: 15 минут — страховка от вечного зависания (источник
+// перестал отвечать), а не ограничение скорости скачивания.
+const leaderTimeout = 15 * time.Minute
+
 // fetchOnce гарантирует, что параллельные запросы одного трека порождают
 // не больше одной загрузки: первый пришедший становится «лидером» и качает
 // трек, остальные ждут результата на канале done и получают те же байты.
 // По завершении запись из pending удаляется — иначе она станет вечной утечкой.
-func (p *Proxy) fetchOnce(ctx context.Context, trackID string) ([]byte, error) {
+func (p *Proxy) fetchOnce(ctx context.Context, trackID string) (data []byte, err error) {
 	p.mu.Lock()
+	// Перепроверяем буфер под тем же мьютексом, которым защищена карта
+	// pending: пока эта горутина шла от промаха в ServeTrack (проверка без
+	// лока) до захвата mu, лидер мог успеть отдать результат, положить его
+	// в буфер и снять свою запись из pending. Без этой проверки горутина не
+	// найдёт запись в pending и станет новым лидером, хотя трек уже лежит
+	// в буфере — второе, лишнее обращение к источнику.
+	if cached, ok := p.buf.Get(trackID); ok {
+		p.mu.Unlock()
+		return cached, nil
+	}
 	if pf, ok := p.pending[trackID]; ok {
 		p.mu.Unlock()
 		<-pf.done
@@ -101,7 +122,34 @@ func (p *Proxy) fetchOnce(ctx context.Context, trackID string) ([]byte, error) {
 	p.pending[trackID] = pf
 	p.mu.Unlock()
 
-	pf.data, pf.err = p.fetch(ctx, trackID)
+	// Лидер качает не на ctx своего запроса: обрыв именно его соединения не
+	// должен утаскивать за собой ожидающих (см. комментарий к leaderTimeout).
+	fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), leaderTimeout)
+	defer cancel()
+
+	defer func() {
+		if r := recover(); r != nil {
+			// Паника при загрузке (например, в разборе XML резолвера) не
+			// должна ронять демон. Не менее важно — не оставить запись в
+			// pending навсегда: без явных delete+close все последующие
+			// запросы этого трека до перезапуска процесса зависали бы на
+			// <-pf.done, который уже некому закрыть. Простой defer без
+			// recover решал бы только зависание, но подсовывал бы
+			// ожидающим пустой успех (pf.data==nil, pf.err==nil, код 200
+			// без звука вместо ошибки) — поэтому сначала выставляем
+			// содержательную ошибку, и только потом снимаем запись и
+			// будим ожидающих.
+			pf.data = nil
+			pf.err = fmt.Errorf("загрузка трека аварийно завершилась: %v", r)
+			p.mu.Lock()
+			delete(p.pending, trackID)
+			p.mu.Unlock()
+			close(pf.done)
+			data, err = pf.data, pf.err
+		}
+	}()
+
+	pf.data, pf.err = p.fetch(fetchCtx, trackID)
 	if pf.err == nil {
 		p.buf.Put(trackID, pf.data)
 	}
@@ -157,7 +205,7 @@ func (p *Proxy) download(ctx context.Context, link string) ([]byte, int, error) 
 	// Content-Length известен заранее — отказываем сразу, не выкачивая
 	// впустую сотню мегабайт, если источник честно сообщил размер.
 	if resp.ContentLength > p.maxBytes {
-		return nil, resp.StatusCode, fmt.Errorf("%s", oversizedTrackMsg)
+		return nil, resp.StatusCode, errors.New(oversizedTrackMsg)
 	}
 	// Читаем с запасом в один байт: LimitReader, упёршись в предел, отдаёт
 	// io.EOF без ошибки, и ReadAll вернул бы ровно maxBytes с ошибкой nil —
@@ -167,7 +215,7 @@ func (p *Proxy) download(ctx context.Context, link string) ([]byte, int, error) 
 		return nil, resp.StatusCode, err
 	}
 	if int64(len(data)) > p.maxBytes {
-		return nil, resp.StatusCode, fmt.Errorf("%s", oversizedTrackMsg)
+		return nil, resp.StatusCode, errors.New(oversizedTrackMsg)
 	}
 	return data, resp.StatusCode, nil
 }

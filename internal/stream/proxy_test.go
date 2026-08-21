@@ -209,3 +209,172 @@ func TestProxyDoesNotLeakUpstreamDetails(t *testing.T) {
 		t.Fatalf("тело не объясняет ошибку: %q", body)
 	}
 }
+
+// panicOnceResolver паникует при каждом вызове. Первый вызов сперва
+// сигнализирует entered и блокируется на release — это даёт тесту
+// возможность гарантированно подписать «ожидающего» на pending-запись
+// лидера до того, как резолвер запаникует.
+type panicOnceResolver struct {
+	entered chan struct{}
+	release chan struct{}
+	calls   int32
+}
+
+func (r *panicOnceResolver) ResolveTrack(ctx context.Context, trackID string) (string, error) {
+	if atomic.AddInt32(&r.calls, 1) == 1 {
+		close(r.entered)
+		<-r.release
+	}
+	panic("паника резолвера")
+}
+
+// Паника внутри загрузки (например, при разборе XML резолвера) не должна
+// ронять демон и не должна оставить запись в pending навсегда: без
+// recover+delete+close все последующие запросы этого трека зависли бы на
+// <-pf.done, который уже некому закрыть.
+func TestProxyRecoversFromLeaderPanic(t *testing.T) {
+	res := &panicOnceResolver{entered: make(chan struct{}), release: make(chan struct{})}
+	p := NewProxy(res, NewBuffer(1024), http.DefaultClient)
+
+	leaderDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		p.ServeTrack(rec, httptest.NewRequest(http.MethodGet, "/stream/1", nil), "1")
+		leaderDone <- rec
+	}()
+
+	select {
+	case <-res.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("лидер не вошёл в резолвер")
+	}
+
+	waiterDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		p.ServeTrack(rec, httptest.NewRequest(http.MethodGet, "/stream/1", nil), "1")
+		waiterDone <- rec
+	}()
+
+	time.Sleep(20 * time.Millisecond) // дать ожидающему подписаться на pending
+	close(res.release)                // резолвер паникует
+
+	checks := []struct {
+		name string
+		ch   chan *httptest.ResponseRecorder
+	}{
+		{"лидер", leaderDone},
+		{"ожидающий", waiterDone},
+	}
+	for _, c := range checks {
+		select {
+		case rec := <-c.ch:
+			if rec.Code != http.StatusBadGateway {
+				t.Fatalf("%s: code = %d, want 502 (паника лидера должна обернуться в ошибку)", c.name, rec.Code)
+			}
+			if rec.Body.Len() == 0 {
+				t.Fatalf("%s: пустое тело — паника не должна превращаться в пустой успех", c.name)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: запрос завис после паники резолвера — запись в pending не была снята", c.name)
+		}
+	}
+
+	// Повторный запрос того же трека обязан снова попытаться загрузиться,
+	// а не зависнуть на утёкшей записи pending.
+	rec := httptest.NewRecorder()
+	retryDone := make(chan struct{})
+	go func() {
+		p.ServeTrack(rec, httptest.NewRequest(http.MethodGet, "/stream/1", nil), "1")
+		close(retryDone)
+	}()
+	select {
+	case <-retryDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("повторный запрос трека завис — запись в pending осталась навсегда")
+	}
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("повторный запрос: code = %d, want 502", rec.Code)
+	}
+	if got := atomic.LoadInt32(&res.calls); got != 2 {
+		t.Fatalf("резолвер вызван %d раз, want 2 (повторный запрос должен попытаться заново)", got)
+	}
+}
+
+// Между промахом мимо буфера в ServeTrack (без лока) и захватом p.mu внутри
+// fetchOnce лидер мог успеть отдать результат, положить его в буфер и снять
+// свою запись из pending. fetchOnce обязан перепроверить буфер под тем же
+// мьютексом — иначе он не найдёт запись в pending и станет новым лидером,
+// хотя трек уже лежит в буфере.
+func TestProxyFetchOnceRechecksBufferUnderLock(t *testing.T) {
+	res := &fakeResolver{} // без url — вызов ResolveTrack вернул бы ошибку
+	buf := NewBuffer(1024)
+	buf.Put("1", []byte("CACHED"))
+	p := NewProxy(res, buf, http.DefaultClient)
+
+	data, err := p.fetchOnce(context.Background(), "1")
+	if err != nil {
+		t.Fatalf("err = %v, want nil (трек уже в буфере)", err)
+	}
+	if string(data) != "CACHED" {
+		t.Fatalf("data = %q, want %q", data, "CACHED")
+	}
+	if got := atomic.LoadInt32(&res.calls); got != 0 {
+		t.Fatalf("резолвер вызван %d раз, want 0 — трек должен браться из буфера, а не качаться заново", got)
+	}
+}
+
+// Лидер с уже отменённым контекстом не должен утаскивать за собой
+// ожидающих: типичный сценарий — <audio> открывает поток, тут же обрывает
+// первый запрос и переоткрывает его с Range, пока первая загрузка ещё идёт.
+func TestProxyLeaderCancellationDoesNotAffectWaiters(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	var once sync.Once
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() { close(entered) })
+		<-release
+		w.Write([]byte("AUDIOBYTES"))
+	}))
+	defer origin.Close()
+
+	p := NewProxy(&fakeResolver{url: origin.URL}, NewBuffer(1024), origin.Client())
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	cancelLeader() // контекст лидера уже отменён к моменту запроса
+
+	leaderReq := httptest.NewRequest(http.MethodGet, "/stream/1", nil).WithContext(leaderCtx)
+	leaderDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		p.ServeTrack(rec, leaderReq, "1")
+		leaderDone <- rec
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("лидер (с уже отменённым контекстом) не дошёл до источника — контекст не был отвязан")
+	}
+
+	waiterReq := httptest.NewRequest(http.MethodGet, "/stream/1", nil) // живой контекст
+	waiterDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		p.ServeTrack(rec, waiterReq, "1")
+		waiterDone <- rec
+	}()
+
+	time.Sleep(20 * time.Millisecond) // дать ожидающему подписаться на pending
+	close(release)
+
+	select {
+	case rec := <-waiterDone:
+		if rec.Code != http.StatusOK || rec.Body.String() != "AUDIOBYTES" {
+			t.Fatalf("ожидающий: code=%d body=%q, want 200/\"AUDIOBYTES\" (отменённый контекст лидера не должен на него влиять)", rec.Code, rec.Body.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ожидающий завис вместо получения данных")
+	}
+	<-leaderDone
+}
