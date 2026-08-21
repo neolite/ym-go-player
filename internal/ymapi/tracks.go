@@ -131,3 +131,17 @@ func (c *Client) ResolveDirectLink(ctx context.Context, v DownloadVariant) (stri
 	}
 	return DirectLinkMP3(info.Host, info.Path, info.TS, info.S), nil
 }
+
+// ResolveTrack реализует stream.Resolver: от идентификатора трека
+// до готовой подписанной ссылки одним вызовом.
+func (c *Client) ResolveTrack(ctx context.Context, trackID string) (string, error) {
+	variants, err := c.DownloadVariants(ctx, trackID)
+	if err != nil {
+		return "", err
+	}
+	best, ok := PickBest(variants)
+	if !ok {
+		return "", errors.New("нет доступных вариантов качества (проверьте подписку Плюс)")
+	}
+	return c.ResolveDirectLink(ctx, best)
+}
