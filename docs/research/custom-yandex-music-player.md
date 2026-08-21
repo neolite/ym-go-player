@@ -214,7 +214,7 @@
 | **get-file-info** | Высокое качество + FLAC (HMAC-подпись) | `/get-file-info` (HMAC-SHA256, ключ `7tvSmFbyf5hJnIHhCimDDD`) | ⚠️ |
 | Ротор / «Моя волна» | Стрим-станция, next-треки | `rotor_station_tracks('user:onyourwave')`, `rotor_station_feedback()` | ✅ метод / ⚠️ детали |
 | **Фидбек проигрывания** | Чтобы рекомендации/«Моя волна» учились | `play_audio(...)` → `/play-audio` (start/skip/end события) | ✅ метод / ⚠️ путь |
-| Лайк/дизлайк (опц.) | Влияет на рекомендации | `users_likes_tracks_add/remove()` | ✅/⚠️ |
+| Лайк/дизлайк (опц.) | Влияет на рекомендации | `users_likes_tracks_add/remove()` → `/users/{uid}/likes/tracks/{add-multiple,remove}` (снятие — именно `remove`, без «-multiple»: такого пути нет, отвечает 404) | ✅ живой прогон 2026-08 |
 | Ynison (опц.) | Синхронизация/«пульт» | `wss://ynison.music.yandex.net` (+redirector), заголовки `Ynison-Device-Id`, `Ynison-Device-Info`, Bearer | ⚠️ |
 
 **Минимальный happy-path воспроизведения:**

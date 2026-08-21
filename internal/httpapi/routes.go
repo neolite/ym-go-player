@@ -53,6 +53,9 @@ func (a *App) Routes() *http.ServeMux {
 	mux.HandleFunc("POST /api/player/resume", a.handleResume)
 	mux.HandleFunc("POST /api/player/progress", a.handleProgress)
 	mux.HandleFunc("POST /api/player/volume", a.handleVolume)
+	mux.HandleFunc("POST /api/tracks/{trackId}/like", a.handleLike)
+	mux.HandleFunc("DELETE /api/tracks/{trackId}/like", a.handleUnlike)
+	mux.HandleFunc("POST /api/tracks/{trackId}/dislike", a.handleDislike)
 	mux.HandleFunc("GET /stream/{trackId}", a.handleStream)
 	return mux
 }
@@ -318,12 +321,20 @@ func (a *App) handleNext(w http.ResponseWriter, r *http.Request) {
 	if body.Reason == "finished" {
 		event = ymapi.EventTrackFinished
 	}
+	a.advanceToNext(r.Context(), event)
+	writeJSON(w, http.StatusOK, a.snapshot())
+}
+
+// advanceToNext переводит очередь на следующий трек. Общий хвост handleNext
+// и handleDislike: дизлайк — это усиленный скип, и весь фидбек уходящего
+// трека (event + play-audio внутри reportFinished) обязан уйти ДО сдвига
+// очереди, иначе cur и позиция будут относиться уже к новому треку.
+func (a *App) advanceToNext(ctx context.Context, event string) {
 	a.reportFinished(event)
 
 	if !a.Queue.Next() {
 		a.resetPosition()
 		a.setStatus(player.StatusIdle, "")
-		writeJSON(w, http.StatusOK, a.snapshot())
 		return
 	}
 	// Позиция принадлежит уже ПРОШЛОМУ треку — reportFinished выше уже
@@ -333,10 +344,9 @@ func (a *App) handleNext(w http.ResponseWriter, r *http.Request) {
 	// не звучал вовсе.
 	a.resetPosition()
 	a.reportTrackStarted()
-	a.refillWave(r.Context())
+	a.refillWave(ctx)
 	a.retainBuffer()
 	a.setStatus(player.StatusLoading, "")
-	writeJSON(w, http.StatusOK, a.snapshot())
 }
 
 func (a *App) handlePrev(w http.ResponseWriter, r *http.Request) {
@@ -347,6 +357,89 @@ func (a *App) handlePrev(w http.ResponseWriter, r *http.Request) {
 	a.retainBuffer()
 	a.setStatus(player.StatusLoading, "")
 	writeJSON(w, http.StatusOK, a.snapshot())
+}
+
+// handleLike ставит лайк: в библиотеку («Мне нравится») синхронно —
+// пользователь жмёт кнопку и ждёт подтверждения, ошибку надо показать, —
+// а в обучение волны (ротор) в фоне, как весь фидбек станции.
+func (a *App) handleLike(w http.ResponseWriter, r *http.Request) {
+	a.setTrackLike(w, r, true)
+}
+
+// handleUnlike снимает лайк (DELETE /api/tracks/{id}/like по спеке).
+// Снятие — действие библиотеки, а не оценка станции, поэтому в ротор
+// здесь ничего не уходит.
+func (a *App) handleUnlike(w http.ResponseWriter, r *http.Request) {
+	a.setTrackLike(w, r, false)
+}
+
+func (a *App) setTrackLike(w http.ResponseWriter, r *http.Request, like bool) {
+	uid, ok := a.requireUID(w)
+	if !ok {
+		return
+	}
+	c, err := a.client(w)
+	if err != nil {
+		return
+	}
+	id := r.PathValue("trackId")
+	op := c.UnlikeTrack
+	if like {
+		op = c.LikeTrack
+	}
+	if err := op(r.Context(), uid, id); err != nil {
+		a.apiError(w, err)
+		return
+	}
+	if like {
+		a.reportLikeFeedback(id, ymapi.EventLike)
+	}
+	writeJSON(w, http.StatusOK, a.snapshot())
+}
+
+// handleDislike — усиленный скип. Оценка dislike уходит в обучение волны
+// (тот же канал, что лайк и скип), а дальше демон делает ровно то же, что
+// по кнопке «вперёд»: так себя ведёт и сам Яндекс — дизлайк прерывает трек.
+// Оценка не-текущего трека очередь не двигает: перескакивать из-за оценки
+// того, что сейчас не звучит, нельзя.
+func (a *App) handleDislike(w http.ResponseWriter, r *http.Request) {
+	if _, err := a.client(w); err != nil {
+		return
+	}
+	id := r.PathValue("trackId")
+	a.reportLikeFeedback(id, ymapi.EventDislike)
+	cur := a.Queue.Current()
+	if cur == nil || cur.ID != id {
+		writeJSON(w, http.StatusOK, a.snapshot())
+		return
+	}
+	a.advanceToNext(r.Context(), ymapi.EventSkip)
+	writeJSON(w, http.StatusOK, a.snapshot())
+}
+
+// reportLikeFeedback шлёт оценку (like/dislike) в обучение волны — но
+// только если оценили именно текущий трек при живой станции: событие
+// адресовано станции и её контексту, а не библиотеке. В фоне через goSafe,
+// как весь фидбек: сбой канала не должен прерывать воспроизведение.
+func (a *App) reportLikeFeedback(trackID, event string) {
+	_, _, source := a.Queue.Snapshot()
+	if source != "wave" {
+		return
+	}
+	cur := a.Queue.Current()
+	if cur == nil || cur.ID != trackID {
+		return
+	}
+	c, err := a.newClient()
+	if err != nil {
+		return
+	}
+	a.mu.RLock()
+	pos, batch := a.position, a.batchID
+	a.mu.RUnlock()
+	goSafe("ротор: "+event, func() error {
+		return c.RotorFeedback(context.Background(), ymapi.WaveStationID, batch, event, trackID, pos)
+	})
 }
 
 // handleQueueIndex переставляет позицию внутри УЖЕ играющей очереди по

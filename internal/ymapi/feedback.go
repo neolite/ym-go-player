@@ -12,6 +12,8 @@ const (
 	EventTrackStarted  = "trackStarted"
 	EventTrackFinished = "trackFinished"
 	EventSkip          = "skip"
+	EventLike          = "like"
+	EventDislike       = "dislike"
 )
 
 // RotorFeedback сообщает волне, что произошло с треком.
@@ -27,8 +29,10 @@ func (c *Client) RotorFeedback(ctx context.Context, station, batchID, eventType,
 	// totalPlayedSeconds имеет смысл только там, где прослушивание уже
 	// завершилось или было прервано: у radioStarted и trackStarted ещё нет
 	// «сколько проиграно», а лишнее поле ротор может воспринять как
-	// противоречивое.
-	if eventType == EventTrackFinished || eventType == EventSkip {
+	// противоречивое. Лайк и дизлайк тоже несут позицию — ротору важно,
+	// на какой секунде трек оценили.
+	switch eventType {
+	case EventTrackFinished, EventSkip, EventLike, EventDislike:
 		body["totalPlayedSeconds"] = playedSeconds
 	}
 	q := url.Values{}
