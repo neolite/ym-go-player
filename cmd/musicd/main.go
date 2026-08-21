@@ -29,7 +29,14 @@ func main() {
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-	<-stop
+
+	// Ждём либо сигнал завершения от ОС, либо неожиданную гибель сервера —
+	// в последнем случае не молчим, а завершаемся с понятным сообщением.
+	select {
+	case <-stop:
+	case err := <-srv.Err():
+		log.Fatalf("сервер неожиданно остановился: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

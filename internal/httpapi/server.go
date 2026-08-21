@@ -3,8 +3,10 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
 )
 
@@ -12,6 +14,25 @@ import (
 type Server struct {
 	http *http.Server
 	ln   net.Listener
+	errc chan error
+
+	// served закрывается, когда горутина Serve из текущей сессии Start
+	// фактически завершилась и приняла решение — сообщать об ошибке или
+	// нет. Позволяет дождаться реального выхода горутины, а не полагаться
+	// на то, что Shutdown успел её дождаться сам.
+	served chan struct{}
+
+	// shuttingDown относится к ТЕКУЩЕЙ сессии Start и переприсваивается
+	// на новый объект при каждом Start. Горутина Serve захватывает свой
+	// объект сессии через замыкание, а не читает поле Server напрямую —
+	// это принципиально: Shutdown.Wait() внутри http.Server.Shutdown не
+	// синхронизирован с моментом, когда наша горутина дочитает флаг после
+	// возврата из Serve, поэтому если бы Start просто сбрасывал общее
+	// поле, второй Start мог бы успеть обнулить флаг раньше, чем горутина
+	// первой сессии успеет его прочитать, и штатное завершение первой
+	// сессии ошибочно утекло бы в errc как "асинхронный отказ". Отдельный
+	// объект на сессию исключает эту гонку в принципе.
+	shuttingDown *atomic.Bool
 }
 
 // New создаёт сервер с заданным роутером. Порт выбирается при Start.
@@ -21,6 +42,7 @@ func New(mux *http.ServeMux) *Server {
 			Handler:           mux,
 			ReadHeaderTimeout: 5 * time.Second,
 		},
+		errc: make(chan error, 1),
 	}
 }
 
@@ -31,7 +53,36 @@ func (s *Server) Start() error {
 		return err
 	}
 	s.ln = ln
-	go s.http.Serve(ln)
+
+	// Новый флаг на каждую сессию — см. комментарий к полю shuttingDown.
+	sessionShuttingDown := &atomic.Bool{}
+	s.shuttingDown = sessionShuttingDown
+
+	served := make(chan struct{})
+	s.served = served
+
+	go func() {
+		defer close(served)
+
+		serveErr := s.http.Serve(ln)
+		if serveErr == nil {
+			return
+		}
+		// ErrServerClosed — штатный результат вызова Shutdown для этой же
+		// сессии (проверяем флаг именно этой сессии, захваченный
+		// замыканием). Любая другая ошибка (включая ErrServerClosed,
+		// полученный не от нашего Shutdown, например при переиспользовании
+		// http.Server после предыдущего Shutdown) — асинхронный отказ, о
+		// котором нельзя молчать.
+		if errors.Is(serveErr, http.ErrServerClosed) && sessionShuttingDown.Load() {
+			return
+		}
+		select {
+		case s.errc <- serveErr:
+		default:
+			// В канале уже лежит непрочитанная ошибка — не блокируемся.
+		}
+	}()
 	return nil
 }
 
@@ -48,5 +99,16 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.http == nil {
 		return nil
 	}
+	if s.shuttingDown != nil {
+		s.shuttingDown.Store(true)
+	}
 	return s.http.Shutdown(ctx)
+}
+
+// Err возвращает канал, в который попадает ошибка, если Serve завершился
+// не из-за штатного вызова Shutdown. Канал буферизован на одно значение;
+// вызывающая сторона слушает его наравне с сигналами ОС, чтобы не молчать
+// при асинхронном отказе сервера.
+func (s *Server) Err() <-chan error {
+	return s.errc
 }
