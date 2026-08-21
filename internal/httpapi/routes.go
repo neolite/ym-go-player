@@ -274,18 +274,62 @@ func (a *App) handlePlay(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.Queue.Set(tracks, body.Source)
+	a.resetPosition()
 	a.retainBuffer()
 	a.setStatus(player.StatusLoading, "")
+	// trackStarted обязан уйти для каждого трека волны, включая первый —
+	// раньше (находка 1) он не уходил вовсе. reportTrackStarted сама
+	// проверяет источник и не шлёт ничего для "playlist"/"likes"/"search"/
+	// "tracks": там нет станции, которой это событие было бы адресовано.
+	a.reportTrackStarted()
 	writeJSON(w, http.StatusOK, a.snapshot())
 }
 
+// handleNext переводит очередь на следующий трек. Этот обработчик — точка
+// входа для ДВУХ разных пользовательских намерений, которые демон не может
+// различить по одной физической природе запроса: нажатие кнопки «вперёд»
+// (web/src/app.ts, click на btnNext) и естественное окончание трека
+// (audio "ended" в том же файле). Раньше (находка 1) в обоих случаях в
+// «Мою волну» безусловно уходил EventTrackFinished — скип на середине
+// трека учил волну ровно наоборот: «этот трек понравился».
+//
+// Тело запроса необязательное: {"reason": "finished"} — явный маркер
+// автоперехода; любое другое значение, отсутствие поля или отсутствие
+// тела целиком трактуются как скип. Это осознанный дефолт в пользу
+// человека, а не default-разбора: кнопку жмёт человек, а автопереход
+// обязан пометить себя явно. Ошибка разбора тела (не считая пустого тела)
+// не блокирует запрос — тоже трактуется как скип, тот же безопасный
+// дефолт для любого не-"finished" случая.
+//
+// Фронтенд начнёт присылать reason:"finished" на "ended" отдельной
+// правкой (эта часть цикла — только серверная); до её выкладки каждое
+// естественное окончание трека будет ошибочно учитываться как skip. Это
+// временный побочный эффект выбранного дефолта, а не дефект этой правки —
+// он снимается тем же коммитом, что научит фронтенд слать reason.
 func (a *App) handleNext(w http.ResponseWriter, r *http.Request) {
-	a.reportFinished(ymapi.EventTrackFinished)
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10)).Decode(&body)
+	event := ymapi.EventSkip
+	if body.Reason == "finished" {
+		event = ymapi.EventTrackFinished
+	}
+	a.reportFinished(event)
+
 	if !a.Queue.Next() {
+		a.resetPosition()
 		a.setStatus(player.StatusIdle, "")
 		writeJSON(w, http.StatusOK, a.snapshot())
 		return
 	}
+	// Позиция принадлежит уже ПРОШЛОМУ треку — reportFinished выше уже
+	// прочитал её (находка 4). Без обнуления здесь следующий reportFinished
+	// (например, второй "next" через секунду) унаследует чужую позицию и
+	// пришлёт в оба канала фидбека десятки/сотни секунд для трека, который
+	// не звучал вовсе.
+	a.resetPosition()
+	a.reportTrackStarted()
 	a.refillWave(r.Context())
 	a.retainBuffer()
 	a.setStatus(player.StatusLoading, "")
@@ -293,7 +337,10 @@ func (a *App) handleNext(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handlePrev(w http.ResponseWriter, r *http.Request) {
-	a.Queue.Prev()
+	if a.Queue.Prev() {
+		a.resetPosition()
+		a.reportTrackStarted()
+	}
 	a.retainBuffer()
 	a.setStatus(player.StatusLoading, "")
 	writeJSON(w, http.StatusOK, a.snapshot())
@@ -390,10 +437,52 @@ func (a *App) refillWave(ctx context.Context) {
 	a.Queue.Append(batch.Tracks)
 }
 
-// reportFinished отправляет оба канала фидбека для текущего трека. Оба
-// вызова асинхронны и идут через goSafe: фидбек ротора и статистика
-// прослушиваний необязательны для воспроизведения и не должны ни прерывать
-// его, ни ронять демон, если Яндекс перестанет их принимать.
+// resetPosition обнуляет накопленную позицию воспроизведения. Обязана
+// звonить в любом месте, где меняется текущий трек (handlePlay, handleNext,
+// handlePrev, находка 4) — иначе следующий вызов reportFinished унаследует
+// позицию уже сыгранного трека и пришлёт её как "сколько проиграно" для
+// трека, который ещё не начинал звучать.
+func (a *App) resetPosition() {
+	a.mu.Lock()
+	a.position = 0
+	a.mu.Unlock()
+}
+
+// reportTrackStarted уведомляет ротор о начале нового трека волны
+// (ymapi.EventTrackStarted, находка 1). В отличие от reportFinished, это
+// исключительно канал станции: применимо только когда источник очереди —
+// "wave", событие не несёт "сколько проиграно" (см. RotorFeedback) и не
+// затрагивает канал общей статистики (/play-audio). Источник проверяется
+// внутри, так что вызывающему не нужно знать про "wave" — безопасно звать
+// после ЛЮБОГО перехода на новый текущий трек.
+func (a *App) reportTrackStarted() {
+	_, _, source := a.Queue.Snapshot()
+	if source != "wave" {
+		return
+	}
+	cur := a.Queue.Current()
+	if cur == nil {
+		return
+	}
+	c, err := a.newClient()
+	if err != nil {
+		return
+	}
+	a.mu.RLock()
+	batch := a.batchID
+	a.mu.RUnlock()
+	goSafe("ротор: trackStarted", func() error {
+		return c.RotorFeedback(context.Background(), ymapi.WaveStationID, batch, ymapi.EventTrackStarted, cur.ID, 0)
+	})
+}
+
+// reportFinished отправляет оба канала фидбека для трека, который только
+// что перестал быть текущим (event — ymapi.EventSkip либо
+// ymapi.EventTrackFinished, находка 1). Оба вызова асинхронны и идут через
+// goSafe: фидбек ротора и статистика прослушиваний необязательны для
+// воспроизведения и не должны ни прерывать его, ни ронять демон, если
+// Яндекс перестанет их принимать. Зовётся ДО того, как очередь сдвинется
+// на следующий трек — иначе cur и pos будут относиться уже к новому треку.
 func (a *App) reportFinished(event string) {
 	cur := a.Queue.Current()
 	if cur == nil {
@@ -413,9 +502,25 @@ func (a *App) reportFinished(event string) {
 			return c.RotorFeedback(context.Background(), ymapi.WaveStationID, batch, event, cur.ID, pos)
 		})
 	}
+
+	// UID — идентификатор аккаунта из проверенного статуса (см.
+	// PlayEvent.UID). a.Auth может быть nil (например, в тестах, которые
+	// не проверяют авторизацию) — Auth.UID() безопасен на пустом Auth, но
+	// не на нулевом указателе *Auth, поэтому проверка здесь обязательна.
+	var uid int64
+	if a.Auth != nil {
+		uid = a.Auth.UID()
+	}
 	goSafe("статистика: playAudio", func() error {
 		return c.PlayAudio(context.Background(), ymapi.PlayEvent{
-			TrackID:       cur.ID,
+			TrackID: cur.ID,
+			// AlbumID оставлен пустым: player.Track не несёт числового
+			// идентификатора альбома (только заголовок в Album) — заводить
+			// под это поле пришлось бы менять контракт очереди и SSE-кадра
+			// ради значения, которое ни разу не проверялось на боевом
+			// сервисе (см. находку 9 брифа). Пустая строка — честное
+			// "не задан", а не выдуманное значение.
+			UID:           uid,
 			From:          source,
 			PlayedSeconds: pos,
 			TotalSeconds:  float64(cur.Duration),
