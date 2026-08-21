@@ -27,10 +27,10 @@ func TestDirectLinkMP3(t *testing.T) {
 	}
 }
 
-// Вектор посчитан независимо: hmac-sha256 ключом "7tvSmFbyf5hJnIHhCimDDD"
+// Вектор посчитан независимо: hmac-sha256 ключом KeyFileInfo ("7tvSmFbyf5hJnIHhCimDDD")
 // по конкатенации "1700000000"+"12345"+"lossless"+"flac"+"raw", base64 без padding.
 func TestSignFileInfo(t *testing.T) {
-	got := SignFileInfo("7tvSmFbyf5hJnIHhCimDDD", "1700000000", "12345", "lossless", "flac", "raw")
+	got := SignFileInfo(KeyFileInfo, "1700000000", "12345", "lossless", "flac", "raw")
 	const want = "DevZeCG/M+0jdeH6+xBnQ4+IBNXCimprqilmw1mnEw8"
 	if got != want {
 		t.Fatalf("SignFileInfo = %q, want %q", got, want)
