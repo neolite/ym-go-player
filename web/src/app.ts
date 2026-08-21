@@ -87,12 +87,19 @@ function setFailureError(message: string): void {
   paintErrorBar();
 }
 
+// Все маршруты, которые вызывает api(), — POST (routes.go:46-52); GET-роуты
+// (/api/playlists, /api/likes, /api/search) идут отдельным fetch мимо этой
+// функции. method обязан быть POST всегда, а не только когда есть тело:
+// fetch(path, {}) без явного method уходит GET, и без тела (next/prev/
+// pause/resume) все эти вызовы получали 404.
 async function api(path: string, body?: unknown): Promise<any> {
-  const res = await fetch(path, body === undefined ? {} : {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  const res = await fetch(path, body === undefined
+    ? { method: "POST" }
+    : {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
   if (!res.ok) {
     const text = await res.text();
     showTransientError(text);
@@ -164,8 +171,13 @@ $("tokenSave").addEventListener("click", async () => {
 
 function render(st: State): void {
   const t = st.track;
+  // Оборона клиента: сервер обязан слать [] вместо null для срезов
+  // состояния (см. internal/player/queue.go), но один разорванный кадр не
+  // должен обрывать отрисовку на середине — отсюда `?? []` на каждом
+  // массиве состояния, а не только на верхнем st.queue.
+  const queue = st.queue ?? [];
   $("title").textContent = t ? t.title : "—";
-  $("artist").textContent = t ? t.artists.join(", ") : "";
+  $("artist").textContent = t ? (t.artists ?? []).join(", ") : "";
   ($("cover") as HTMLImageElement).src = t?.coverUrl ?? "";
   $<HTMLButtonElement>("btnPlay").textContent = st.status === "playing" ? "⏸" : "▶";
 
@@ -176,12 +188,12 @@ function render(st: State): void {
   setStateError(st.error ?? "");
 
   listEl.innerHTML = "";
-  st.queue.forEach((track, i) => {
+  queue.forEach((track, i) => {
     const li = document.createElement("li");
-    li.textContent = `${track.title} — ${track.artists.join(", ")}`;
+    li.textContent = `${track.title} — ${(track.artists ?? []).join(", ")}`;
     if (i === st.queueIndex) li.className = "current";
     li.addEventListener("click", () => {
-      api("/api/play", { source: "tracks", tracks: st.queue.slice(i) }).catch(() => {});
+      api("/api/play", { source: "tracks", tracks: queue.slice(i) }).catch(() => {});
     });
     listEl.appendChild(li);
   });
@@ -202,7 +214,7 @@ function updateMediaSession(t: Track): void {
   if (!("mediaSession" in navigator)) return;
   navigator.mediaSession.metadata = new MediaMetadata({
     title: t.title,
-    artist: t.artists.join(", "),
+    artist: (t.artists ?? []).join(", "),
     album: t.album,
     artwork: t.coverUrl ? [{ src: t.coverUrl, sizes: "400x400", type: "image/jpeg" }] : [],
   });

@@ -1,6 +1,8 @@
 package player
 
 import (
+	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -87,6 +89,57 @@ func TestSnapshotReturnsSource(t *testing.T) {
 	_, idx, src := q.Snapshot()
 	if idx != 0 || src != "wave" {
 		t.Fatalf("Snapshot = (%d, %q), want (0, \"wave\")", idx, src)
+	}
+}
+
+// На пустой очереди (в том числе изначальной, до первого Set) Snapshot
+// обязан сериализоваться как []Track{} → "[]" в JSON, а не как null:
+// именно это ловит демон в первом кадре SSE в состоянии простоя.
+// Проверяем сериализованный JSON, а не len(...) == 0 — это доказывает
+// свойство, len() проходит и на nil-срезе тоже.
+func TestSnapshotEmptyQueueSerializesAsEmptyArray(t *testing.T) {
+	q := NewQueue()
+	got, _, _ := q.Snapshot()
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if string(raw) != "[]" {
+		t.Fatalf("Snapshot() пустой очереди сериализовался как %s, want []", raw)
+	}
+}
+
+// Set/Append обязаны нормализовать Track.Artists так же, как Snapshot
+// нормализует сам срез очереди: трек без артистов (nil-срез, например из
+// клиентского JSON в source:"tracks", где поле artists не пришло) не
+// должен превращать "artists" в null в исходящем кадре.
+func TestSetNormalizesNilArtists(t *testing.T) {
+	q := NewQueue()
+	q.Set([]Track{{ID: "a", Title: "без артистов"}}, "tracks")
+	got, _, _ := q.Snapshot()
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(raw), `"artists":null`) {
+		t.Fatalf(`Snapshot содержит "artists":null: %s`, raw)
+	}
+	if !strings.Contains(string(raw), `"artists":[]`) {
+		t.Fatalf(`Snapshot не содержит "artists":[]: %s`, raw)
+	}
+}
+
+func TestAppendNormalizesNilArtists(t *testing.T) {
+	q := NewQueue()
+	q.Set(tracks("a"), "wave")
+	q.Append([]Track{{ID: "b", Title: "без артистов"}})
+	got, _, _ := q.Snapshot()
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(raw), `"artists":null`) {
+		t.Fatalf(`Snapshot содержит "artists":null: %s`, raw)
 	}
 }
 

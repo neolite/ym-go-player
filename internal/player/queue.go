@@ -17,7 +17,7 @@ func NewQueue() *Queue { return &Queue{} }
 func (q *Queue) Set(tracks []Track, source string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.tracks = append([]Track(nil), tracks...)
+	q.tracks = normalizeTracks(tracks)
 	q.index = 0
 	q.source = source
 }
@@ -27,7 +27,25 @@ func (q *Queue) Set(tracks []Track, source string) {
 func (q *Queue) Append(tracks []Track) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.tracks = append(q.tracks, tracks...)
+	q.tracks = append(q.tracks, normalizeTracks(tracks)...)
+}
+
+// normalizeTracks гарантирует, что срезовые поля треков не станут nil.
+// encoding/json кодирует nil-срез как null, а не [], а Track.Artists может
+// прийти нормализованным как угодно — в том числе nil, если source:"tracks"
+// в POST /api/play принёс объект без поля "artists" из клиентского JSON,
+// где никакой toPlayer()-конвертации, гарантирующей непустой срез, не было.
+// Точка входа в очередь — то единственное место в internal/player, где это
+// можно поймать для любого трека, независимо от того, как он был собран.
+func normalizeTracks(tracks []Track) []Track {
+	out := make([]Track, len(tracks))
+	for i, t := range tracks {
+		if t.Artists == nil {
+			t.Artists = []string{}
+		}
+		out[i] = t
+	}
+	return out
 }
 
 // Current возвращает текущий трек либо nil, если очередь пуста.
@@ -76,8 +94,17 @@ func (q *Queue) Remaining() int {
 }
 
 // Snapshot отдаёт копию очереди, позицию и источник.
+//
+// Копия обязана быть non-nil, даже когда q.tracks пуст или ещё ни разу не
+// присваивался (до первого Set — например, самый первый кадр SSE в
+// состоянии простоя): append([]Track(nil), ...) на пустом источнике
+// возвращает nil, а encoding/json кодирует nil-срез как null, а не []. Это
+// контракт HTTP-интерфейса (см. State.Queue в state.go) — любой потребитель
+// кадра, включая веб-клиент, обязан получать здесь настоящий пустой массив.
 func (q *Queue) Snapshot() ([]Track, int, string) {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
-	return append([]Track(nil), q.tracks...), q.index, q.source
+	out := make([]Track, len(q.tracks))
+	copy(out, q.tracks)
+	return out, q.index, q.source
 }
