@@ -1,9 +1,12 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -117,9 +120,13 @@ func TestLogoutClearsToken(t *testing.T) {
 // сбои хранилища (например, недоступную связку ключей), которые нельзя
 // отличить от ErrNoToken при помощи auth.NewMemory().
 type stubStore struct {
-	getToken  string
-	getErr    error
-	setErr    error
+	getToken string
+	getErr   error
+	// setErr, если задан, строит ошибку по фактически переданному в Set
+	// токену — это позволяет тестам моделировать хранилища, чей текст
+	// ошибки отражает входное значение (как это, в принципе, может делать
+	// go-keyring), а не подставлять независимую строку.
+	setErr    func(token string) error
 	deleteErr error
 }
 
@@ -132,7 +139,10 @@ func (s *stubStore) Get() (string, error) {
 
 func (s *stubStore) Set(token string) error {
 	s.getToken = token
-	return s.setErr
+	if s.setErr == nil {
+		return nil
+	}
+	return s.setErr(token)
 }
 
 func (s *stubStore) Delete() error {
@@ -192,16 +202,31 @@ func TestStatusDistinguishesNoTokenFromStoreFailure(t *testing.T) {
 }
 
 // Центральное ограничение проекта: токен не покидает процесс демона ни в
-// одном ответе, ни при каком сценарии.
+// одном ответе, ни при каком сценарии — включая УСПЕШНУЮ авторизацию.
+// verify намеренно принимает именно secret (а не статичный "good"), чтобы
+// ветка сохранения/remember/stateFrom в handleSetToken реально исполнилась:
+// проверка, которая никогда не проходит успешный путь, не проверяет ничего
+// про самый вероятный канал утечки — эхо валидного токена во фронтенд.
 func TestAuthNeverEchoesToken(t *testing.T) {
 	const secret = "SUPERSECRET-DEADBEEF"
-	_, mux := newTestAuth()
+	verify := func(ctx context.Context, token string) (*ymapi.AccountStatus, error) {
+		if token != secret {
+			return nil, ymapi.ErrUnauthorized
+		}
+		return &ymapi.AccountStatus{UID: 99, Login: "echoguard", Region: 225, HasPlus: true}, nil
+	}
+	a := NewAuth(auth.NewMemory(), verify)
+	mux := http.NewServeMux()
+	a.Register(mux)
 
 	var bodies []string
 
 	setRec := httptest.NewRecorder()
 	mux.ServeHTTP(setRec, httptest.NewRequest(http.MethodPost, "/api/auth/token",
 		strings.NewReader(`{"token":"`+secret+`"}`)))
+	if setRec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200 (успешная ветка обязана исполниться)", setRec.Code)
+	}
 	bodies = append(bodies, setRec.Body.String())
 
 	statusRec := httptest.NewRecorder()
@@ -218,29 +243,76 @@ func TestAuthNeverEchoesToken(t *testing.T) {
 	bodies = append(bodies, logoutRec.Body.String())
 
 	for i, body := range bodies {
-		if strings.Contains(body, "SUPERSECRET") {
+		if strings.Contains(body, secret) {
 			t.Fatalf("ответ %d содержит токен: %s", i, body)
 		}
 	}
 }
 
-// Ошибка store.Set не должна протаскивать токен наружу через свой текст.
+// Ошибка store.Set не должна протаскивать токен наружу через свой текст —
+// ни в ответе. Сама ошибка хранилища сконструирована из фактически
+// переданного токена, как это может делать реальный keyring.Set.
 func TestSetTokenStoreFailureDoesNotLeakToken(t *testing.T) {
 	const secret = "SUPERSECRET-STOREFAIL"
-	store := &stubStore{setErr: errors.New("keychain: " + secret + " rejected")}
-	a := NewAuth(store, okVerify)
+	verify := func(ctx context.Context, token string) (*ymapi.AccountStatus, error) {
+		if token != secret {
+			return nil, ymapi.ErrUnauthorized
+		}
+		return &ymapi.AccountStatus{UID: 5, Login: "storefail", Region: 225, HasPlus: true}, nil
+	}
+	store := &stubStore{setErr: func(token string) error {
+		return fmt.Errorf("keychain: %s rejected", token)
+	}}
+	a := NewAuth(store, verify)
 	mux := http.NewServeMux()
 	a.Register(mux)
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/auth/token",
-		strings.NewReader(`{"token":"good"}`)))
+		strings.NewReader(`{"token":"`+secret+`"}`)))
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("code = %d, want 500", rec.Code)
 	}
 	if strings.Contains(rec.Body.String(), secret) {
 		t.Fatalf("ответ содержит токен через ошибку хранилища: %s", rec.Body.String())
+	}
+}
+
+// То же самое, но проверяется лог демона, а не тело ответа: именно этот
+// канал утечки не проверял ни один тест раньше, и именно в нём токен
+// утекал на текущем (до правки) коде. log.SetOutput меняет глобальное
+// состояние пакета log — приёмник восстанавливается через defer, тест не
+// помечен t.Parallel(), чтобы подмена не протекла в соседние тесты пакета.
+func TestSetTokenStoreFailureDoesNotLeakTokenToLog(t *testing.T) {
+	const secret = "SUPERSECRET-LOGLEAK"
+	verify := func(ctx context.Context, token string) (*ymapi.AccountStatus, error) {
+		if token != secret {
+			return nil, ymapi.ErrUnauthorized
+		}
+		return &ymapi.AccountStatus{UID: 6, Login: "logleak", Region: 225, HasPlus: true}, nil
+	}
+	store := &stubStore{setErr: func(token string) error {
+		return fmt.Errorf("keychain: %s rejected", token)
+	}}
+	a := NewAuth(store, verify)
+	mux := http.NewServeMux()
+	a.Register(mux)
+
+	var logBuf bytes.Buffer
+	prevOutput := log.Writer()
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(prevOutput)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/auth/token",
+		strings.NewReader(`{"token":"`+secret+`"}`)))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("code = %d, want 500", rec.Code)
+	}
+	if strings.Contains(logBuf.String(), secret) {
+		t.Fatalf("лог демона содержит токен: %s", logBuf.String())
 	}
 }
 
