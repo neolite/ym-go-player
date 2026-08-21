@@ -148,3 +148,9 @@ func (c *Client) do(req *http.Request, out any) error {
 	}
 	return json.Unmarshal(envelope.Result, out)
 }
+
+// nowUnixFloat вынесен отдельно, чтобы тесты могли подменять время
+// без обращения к системным часам.
+var nowUnixFloat = func() float64 {
+	return float64(time.Now().UnixNano()) / 1e9
+}
