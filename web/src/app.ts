@@ -20,8 +20,23 @@ const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as 
 
 const audio = $<HTMLAudioElement>("audio");
 const listEl = $<HTMLUListElement>("list");
+const listsEl = $<HTMLUListElement>("lists");
 const errorBar = $<HTMLDivElement>("errorBar");
+const bgArtEl = $<HTMLDivElement>("bgArt");
 let currentTrackId = "";
+
+// Позицию внутри трека помнит сервер (State.position), но <audio> после
+// перезагрузки страницы всегда стартует с нуля. Восстанавливаем её один
+// раз на loadedmetadata — раньше currentTime недоступен. Обычную смену
+// трека это не задевает: сервер сбрасывает позицию при переходе
+// (resetPosition в routes.go), и pendingSeek остаётся нулём.
+let pendingSeek = 0;
+audio.addEventListener("loadedmetadata", () => {
+  if (pendingSeek > 0) {
+    audio.currentTime = pendingSeek;
+    pendingSeek = 0;
+  }
+});
 
 // --- ошибки ---
 //
@@ -37,22 +52,26 @@ let currentTrackId = "";
 //   периодически, так что для "устойчивой" ошибки никто не пришлёт её
 //   заново, и таймер, стирающий её через 4с, вернёт пользователя в то самое
 //   молчаливо сломанное состояние, ради избежания которого её вообще
-//   показывали. Отдельные слоты для двух устойчивых источников — потому
-//   что у них разные условия снятия (новый кадр без error / событие
-//   "playing"), и один частый источник (SSE-кадр по другому поводу) не
-//   должен затирать сообщение другого.
+//   показывали. Отдельные слоты для устойчивых источников — потому что у
+//   них разные условия снятия (новый кадр без error / событие "playing" /
+//   следующий checkAuth), и один частый источник (SSE-кадр по другому
+//   поводу) не должен затирать сообщение другого.
 //
 // Разовая ошибка может временно перекрыть устойчивую — после её
 // автоскрытия строка возвращается к устойчивой, если та ещё в силе.
 
 let stickyStateError = "";
 let stickyFailureError = "";
+// Третий устойчивый источник — предупреждение из /api/auth/status (сейчас
+// это неактивный Плюс). Условие снятия у него своё — следующий checkAuth,
+// — поэтому отдельный слот, а не чужой.
+let stickyAuthWarning = "";
 let transientHideTimer: number | undefined;
 
 function currentSticky(): string {
   // Сообщение о пределе неудач актуальнее: оно объясняет, почему плеер
   // молчит прямо сейчас, даже если параллельно пришёл кадр SSE без error.
-  return stickyFailureError || stickyStateError;
+  return stickyFailureError || stickyStateError || stickyAuthWarning;
 }
 
 function paintErrorBar(): void {
@@ -87,11 +106,28 @@ function setFailureError(message: string): void {
   paintErrorBar();
 }
 
+function setAuthWarning(message: string): void {
+  stickyAuthWarning = message;
+  paintErrorBar();
+}
+
 // Все маршруты, которые вызывает api(), — POST (routes.go:46-52); GET-роуты
 // (/api/playlists, /api/likes, /api/search) идут отдельным fetch мимо этой
 // функции. method обязан быть POST всегда, а не только когда есть тело:
 // fetch(path, {}) без явного method уходит GET, и без тела (next/prev/
 // pause/resume) все эти вызовы получали 404.
+// Текст ошибки из ответа сервера. apiError в routes.go шлёт JSON вида
+// {"error": "..."} — показываем само сообщение, а не сырой JSON; ответы
+// не-JSON (http.Error из OriginGuard) уходят в строку как есть.
+async function errorText(res: Response): Promise<string> {
+  const text = await res.text();
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed.error === "string") return parsed.error;
+  } catch { /* не JSON — оставляем исходный текст */ }
+  return text;
+}
+
 async function api(path: string, body?: unknown): Promise<any> {
   const res = await fetch(path, body === undefined
     ? { method: "POST" }
@@ -101,12 +137,45 @@ async function api(path: string, body?: unknown): Promise<any> {
       body: JSON.stringify(body),
     });
   if (!res.ok) {
-    const text = await res.text();
-    showTransientError(text);
-    throw new Error(text);
+    const message = await errorText(res);
+    showTransientError(message);
+    throw new Error(message);
   }
   return res.status === 204 ? null : res.json();
 }
+
+// --- тема ---
+//
+// Четыре темы, переключаемые циклом: базовая SF → кислотная → лаборатория
+// (иммерсивная) → blok (пост-советский брутализм). Это чисто визуальные
+// слои (класс на <body>), логику плеера не трогают. Выбор хранится в
+// localStorage и применяется до первого кадра SSE, чтобы интерфейс не
+// мигал другой темой при загрузке.
+
+const THEME_KEY = "music212.theme";
+const THEMES = ["", "acid", "lab", "blok"];
+let currentTheme = "";
+
+function applyTheme(theme: string, persist = true): void {
+  currentTheme = theme;
+  document.body.classList.toggle("acid", theme === "acid");
+  document.body.classList.toggle("lab", theme === "lab");
+  document.body.classList.toggle("blok", theme === "blok");
+  if (!persist) return;
+  try { localStorage.setItem(THEME_KEY, theme); } catch { /* приватный режим — тема просто не запомнится */ }
+}
+
+// Якорь вида #theme-lab / #theme-acid / #theme-blok включает тему разово,
+// не трогая сохранённый выбор, — удобно для ссылок-демо и headless-проверок.
+const hashTheme = location.hash.match(/^#theme-(acid|lab|blok)$/);
+try {
+  applyTheme(hashTheme ? hashTheme[1] : (localStorage.getItem(THEME_KEY) ?? ""), !hashTheme);
+} catch { /* нет localStorage — остаётся базовая тема */ }
+
+$("btnTheme").addEventListener("click", () => {
+  const next = THEMES[(THEMES.indexOf(currentTheme) + 1) % THEMES.length];
+  applyTheme(next);
+});
 
 // --- авторизация ---
 
@@ -146,8 +215,14 @@ async function checkAuth(): Promise<boolean> {
   if (st.authorized) {
     $("auth").classList.add("hidden");
     $("app").classList.remove("hidden");
+    // Сервер сообщает о неактивном Плюсе в st.message (stateFrom в
+    // auth.go) — раньше при authorized это сообщение просто выбрасывалось,
+    // и пользователь без подписки узнавал о ней только по сбоям
+    // воспроизведения.
+    setAuthWarning(st.message ?? "");
     return true;
   }
+  setAuthWarning("");
   $("auth").classList.remove("hidden");
   $("app").classList.add("hidden");
   $("authMsg").textContent = st.message ?? "";
@@ -167,9 +242,67 @@ $("tokenSave").addEventListener("click", async () => {
   if (res.ok) { await checkAuth(); connect(); }
 });
 
+// --- восстановление контекста ---
+//
+// Демон держит очередь только в памяти процесса: после его перезапуска
+// страница получает пустое состояние и остаётся без трека и обложки.
+// Поэтому фронтенд запоминает контекст (источник, трек, позицию) в
+// localStorage и, если первый кадр SSE пришёл пустым, просит демон собрать
+// тот же источник заново. Восстанавливаемся только в «волну» и «Мне
+// нравится»: параметры запроса для playlist/search (kind, query) в State
+// не сохраняются, и по одному source их не восстановить.
+
+const RESUME_KEY = "music212.resume";
+
+interface ResumeContext { source: string; trackId: string; position: number; }
+
+// resumeContext живёт между первым кадром (где решено восстановиться) и
+// первой сменой трека (где позиция либо применилась, либо сгорела).
+let resumeContext: ResumeContext | null = null;
+
+function loadResumeContext(): ResumeContext | null {
+  try {
+    const raw = localStorage.getItem(RESUME_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (typeof parsed?.source !== "string") return null;
+    if (parsed.source !== "wave" && parsed.source !== "likes") return null;
+    return parsed as ResumeContext;
+  } catch {
+    return null; // битая запись — не повод ронять загрузку
+  }
+}
+
+function saveResumeContext(): void {
+  if (!lastState?.track) return;
+  try {
+    localStorage.setItem(RESUME_KEY, JSON.stringify({
+      source: lastState.source,
+      trackId: lastState.track.id,
+      position: audio.currentTime,
+    } as ResumeContext));
+  } catch { /* приватный режим или квота — сохранение просто не сработает */ }
+}
+
+// onFirstFrame решает, нужно ли восстанавливаться: только если сам демон
+// ничего не помнит (трека в кадре нет). Кадр с треком означает, что
+// очередь жива, и локальная память не нужна. Сохранённого контекста может
+// и не быть (первый запуск вообще) — тогда стартуем «волну» по умолчанию:
+// пустое состояние бывает только у свежего демона, и молчаливое пустое
+// окно хуже, чем самостоятельно заигравшее радио.
+let firstFrameSeen = false;
+
+function onFirstFrame(st: State): void {
+  if (st.track) return;
+  const saved = loadResumeContext();
+  resumeContext = saved;
+  api("/api/play", { source: saved?.source ?? "wave" }).catch(() => {});
+}
+
 // --- отрисовка ---
 
 function render(st: State): void {
+  lastState = st;
   const t = st.track;
   // Оборона клиента: сервер обязан слать [] вместо null для срезов
   // состояния (см. internal/player/queue.go), но один разорванный кадр не
@@ -178,8 +311,22 @@ function render(st: State): void {
   const queue = st.queue ?? [];
   $("title").textContent = t ? t.title : "—";
   $("artist").textContent = t ? (t.artists ?? []).join(", ") : "";
-  ($("cover") as HTMLImageElement).src = t?.coverUrl ?? "";
-  $<HTMLButtonElement>("btnPlay").textContent = st.status === "playing" ? "⏸" : "▶";
+  // Пустому src браузер рисует иконку битой картинки — в пустом состоянии
+  // прячем обложку целиком.
+  const coverEl = $("cover") as HTMLImageElement;
+  if (t?.coverUrl) {
+    coverEl.src = t.coverUrl;
+    coverEl.classList.remove("hidden");
+  } else {
+    coverEl.removeAttribute("src");
+    coverEl.classList.add("hidden");
+  }
+  // Иконка в кнопке play — два SVG, видимость переключает класс playing.
+  $<HTMLButtonElement>("btnPlay").classList.toggle("playing", st.status === "playing");
+  // Активный источник подсвечиваем в шапке — иначе по интерфейсу не видно,
+  // что сейчас играет: «волна» или «нравится».
+  $("btnWave").classList.toggle("active", st.source === "wave");
+  $("btnLikes").classList.toggle("active", st.source === "likes");
 
   // st.error показываем независимо от того, есть трек или нет — ошибка
   // источника (например, отсутствие Плюса) не обязана ждать пустого трека.
@@ -190,7 +337,29 @@ function render(st: State): void {
   listEl.innerHTML = "";
   queue.forEach((track, i) => {
     const li = document.createElement("li");
-    li.textContent = `${track.title} — ${(track.artists ?? []).join(", ")}`;
+    const idx = document.createElement("span");
+    idx.className = "idx";
+    idx.textContent = String(i + 1);
+    // Миниатюра обложки — в базовых темах скрыта CSS'ом, в lab очередь
+    // рисуется каруселью обложек.
+    const qc = document.createElement("img");
+    qc.className = "qcover";
+    qc.loading = "lazy";
+    qc.alt = "";
+    if (track.coverUrl) qc.src = track.coverUrl;
+    const name = document.createElement("span");
+    name.className = "name";
+    const titleEl = document.createElement("span");
+    titleEl.className = "t";
+    titleEl.textContent = track.title;
+    const artistEl = document.createElement("span");
+    artistEl.className = "a";
+    artistEl.textContent = " — " + (track.artists ?? []).join(", ");
+    name.append(titleEl, artistEl);
+    const dur = document.createElement("span");
+    dur.className = "dur";
+    dur.textContent = fmtTime(track.duration);
+    li.append(idx, qc, name, dur);
     if (i === st.queueIndex) li.className = "current";
     li.addEventListener("click", () => {
       api("/api/play", { source: "tracks", tracks: queue.slice(i) }).catch(() => {});
@@ -201,11 +370,35 @@ function render(st: State): void {
   // Смена трека — единственный повод трогать src: иначе перезапустим текущий.
   if (t && t.id !== currentTrackId) {
     currentTrackId = t.id;
+    // Позиция сервера в приоритете; из localStorage — только если демон
+    // после перезапуска вернул тот же самый трек (для «волны» это обычно
+    // не так, и прыжок в середину чужого трека хуже старта с нуля).
+    pendingSeek = st.position > 0 ? st.position
+      : (resumeContext && resumeContext.trackId === t.id ? resumeContext.position : 0);
+    resumeContext = null;
+    // Ползунок двигает только timeupdate, и до первого события нового трека
+    // он продолжал бы показывать позицию предыдущего (а при запрещённом
+    // автоплее — навсегда). Ставим сразу по данным кадра: duration трека
+    // в состоянии есть всегда, ждать метаданные <audio> не нужно.
+    setProgress(t.duration > 0 ? (pendingSeek / t.duration) * 100 : 0);
+    $("timeCur").textContent = fmtTime(pendingSeek);
+    $("timeTotal").textContent = fmtTime(t.duration);
+    $("bigTime").textContent = fmtTime(pendingSeek);
+    // Живой фон темы lab — размытая обложка текущего трека.
+    bgArtEl.style.backgroundImage = t.coverUrl ? `url("${t.coverUrl}")` : "";
     audio.src = `/stream/${t.id}`;
     audio.play().catch(() => {});
     updateMediaSession(t);
   }
-  if (!t) { currentTrackId = ""; audio.removeAttribute("src"); }
+  if (!t) {
+    currentTrackId = "";
+    audio.removeAttribute("src");
+    setProgress(0);
+    $("timeCur").textContent = fmtTime(0);
+    $("timeTotal").textContent = fmtTime(0);
+    $("bigTime").textContent = fmtTime(0);
+    bgArtEl.style.backgroundImage = "";
+  }
 }
 
 // MediaSession даёт медиа-клавиши и карточку «сейчас играет» в системе —
@@ -246,7 +439,10 @@ function subscribe(es: EventSource, onState: (st: State) => void): void {
 function connect(): void {
   source?.close();
   source = new EventSource("/api/events");
-  subscribe(source, render);
+  subscribe(source, (st) => {
+    if (!firstFrameSeen) { firstFrameSeen = true; onFirstFrame(st); }
+    render(st);
+  });
   source.onopen = () => { reconnectDelay = 1000; };
   source.onerror = () => {
     source?.close();
@@ -269,17 +465,41 @@ $("btnPlay").addEventListener("click", () => {
 });
 
 $("btnLists").addEventListener("click", async () => {
-  const lists = await (await fetch("/api/playlists")).json();
-  listEl.innerHTML = "";
+  // Плейлисты рисуются в отдельный #lists, а не в #list, где живёт очередь:
+  // раньше они делили один <ul>, и первый же кадр SSE (render перерисовывает
+  // #list целиком) затирал список плейлистов прямо под курсором. Повторный
+  // клик по кнопке возвращает очередь.
+  if (!listsEl.classList.contains("hidden")) { showQueue(); return; }
+  const res = await fetch("/api/playlists");
+  if (!res.ok) { showTransientError(await errorText(res)); return; }
+  const lists = await res.json();
+  listsEl.innerHTML = "";
   for (const pl of lists) {
     const li = document.createElement("li");
-    li.textContent = `${pl.title} (${pl.trackCount})`;
+    const name = document.createElement("span");
+    name.className = "name";
+    const titleEl = document.createElement("span");
+    titleEl.className = "t";
+    titleEl.textContent = pl.title;
+    name.append(titleEl);
+    const dur = document.createElement("span");
+    dur.className = "dur";
+    dur.textContent = String(pl.trackCount);
+    li.append(name, dur);
     li.addEventListener("click", () => {
       api("/api/play", { source: "playlist", kind: pl.kind }).catch(() => {});
+      showQueue();
     });
-    listEl.appendChild(li);
+    listsEl.appendChild(li);
   }
+  listEl.classList.add("hidden");
+  listsEl.classList.remove("hidden");
 });
+
+function showQueue(): void {
+  listsEl.classList.add("hidden");
+  listEl.classList.remove("hidden");
+}
 
 $("search").addEventListener("keydown", (e) => {
   if ((e as KeyboardEvent).key !== "Enter") return;
@@ -293,7 +513,55 @@ $("volume").addEventListener("input", () => {
   api("/api/player/volume", { volume: v }).catch(() => {});
 });
 
+// Горячие клавиши: пробел — play/pause, стрелки — треки. Не срабатывают
+// из полей ввода, чтобы пробел в поиске не ставил музыку на паузу.
+document.addEventListener("keydown", (e) => {
+  const tag = (e.target as HTMLElement).tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA") return;
+  if ($("app").classList.contains("hidden")) return;
+  if (e.code === "Space") { e.preventDefault(); $("btnPlay").click(); }
+  else if (e.code === "ArrowRight") { api("/api/player/next").catch(() => {}); }
+  else if (e.code === "ArrowLeft") { api("/api/player/prev").catch(() => {}); }
+});
+
+// --- оценки ---
+//
+// Лайк/дизлайк идут на текущий трек из последнего кадра SSE. Дизлайк — это
+// усиленный скип: сервер сам учит волну и переводит очередь дальше
+// (handleDislike в routes.go), звать next отсюда дополнительно не нужно.
+$("btnLike").addEventListener("click", () => {
+  const t = lastState?.track;
+  if (!t) return;
+  api(`/api/tracks/${t.id}/like`).catch(() => {});
+});
+$("btnDislike").addEventListener("click", () => {
+  const t = lastState?.track;
+  if (!t) return;
+  api(`/api/tracks/${t.id}/dislike`).catch(() => {});
+});
+
 // --- прогресс ---
+
+// Последний отрисованный кадр состояния — нужен не для отрисовки, а чтобы
+// сохранять контекст воспроизведения (см. saveResumeContext выше).
+let lastState: State | null = null;
+
+// fmtTime — единственный формат длительности в интерфейсе (m:ss).
+function fmtTime(sec: number): string {
+  if (!isFinite(sec) || sec <= 0) return "0:00";
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+// setProgress двигает и сам ползунок, и закрашенную часть дорожки
+// (CSS-переменная --fill: webkit-дорожку нельзя закрасить псевдоэлементом
+// прогресса, как в Firefox, поэтому градиент по переменной).
+function setProgress(pct: number): void {
+  const v = Math.max(0, Math.min(100, pct));
+  progressEl.value = String(v);
+  progressEl.style.setProperty("--fill", v + "%");
+}
 
 // Пока ползунок держат, фоновые обновления не должны выдирать его из-под
 // курсора: pointerdown/pointerup обрамляют жест перетаскивания.
@@ -306,7 +574,12 @@ progressEl.addEventListener("change", () => { progressDragging = false; });
 
 progressEl.addEventListener("input", () => {
   const pct = parseFloat(progressEl.value);
-  if (audio.duration) audio.currentTime = (pct / 100) * audio.duration;
+  setProgress(pct);
+  if (audio.duration) {
+    audio.currentTime = (pct / 100) * audio.duration;
+    $("timeCur").textContent = fmtTime(audio.currentTime);
+    $("bigTime").textContent = fmtTime(audio.currentTime);
+  }
 });
 
 // Полосу двигаем на timeupdate — он приходит по несколько раз в секунду,
@@ -315,13 +588,16 @@ progressEl.addEventListener("input", () => {
 audio.addEventListener("timeupdate", () => {
   if (progressDragging) return;
   if (audio.duration) {
-    progressEl.value = String((audio.currentTime / audio.duration) * 100);
+    setProgress((audio.currentTime / audio.duration) * 100);
+    $("timeCur").textContent = fmtTime(audio.currentTime);
+    $("bigTime").textContent = fmtTime(audio.currentTime);
   }
 });
 
 setInterval(() => {
   if (!audio.paused && audio.currentTime > 0) {
     api("/api/player/progress", { position: audio.currentTime }).catch(() => {});
+    saveResumeContext();
   }
 }, 5000);
 

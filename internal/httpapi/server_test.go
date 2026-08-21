@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"testing"
 	"time"
@@ -38,6 +39,30 @@ func TestServerBindsLoopbackOnly(t *testing.T) {
 
 	if got := srv.Addr(); len(got) < 10 || got[:10] != "127.0.0.1:" {
 		t.Fatalf("Addr = %q, want 127.0.0.1:<port>", got)
+	}
+}
+
+// TestStartOnFixedAddress проверяет, что StartOn слушает ровно запрошенный
+// адрес — на этом держится флаг -addr демона и постоянный порт интерфейса.
+func TestStartOnFixedAddress(t *testing.T) {
+	// Берём свободный порт у ОС и сразу освобождаем: окно гонки между
+	// Close и StartOn микроскопично, а гарантированно свободный порт иначе
+	// не получить.
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("probe Listen: %v", err)
+	}
+	addr := probe.Addr().String()
+	probe.Close()
+
+	srv := New(http.NewServeMux())
+	if err := srv.StartOn(addr); err != nil {
+		t.Fatalf("StartOn(%q): %v", addr, err)
+	}
+	defer srv.Shutdown(context.Background())
+
+	if got := srv.Addr(); got != addr {
+		t.Fatalf("Addr = %q, want %q", got, addr)
 	}
 }
 

@@ -8,4 +8,4 @@ test:
 build: web
 	go build -o musicd ./cmd/musicd
 run: build
-	./musicd
+	./musicd -addr 127.0.0.1:61588

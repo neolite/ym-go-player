@@ -24,6 +24,7 @@ import (
 func main() {
 	noKeychain := flag.Bool("no-keychain", false, "хранить токен только в памяти процесса")
 	noOpen := flag.Bool("no-open", false, "не открывать браузер при старте")
+	addr := flag.String("addr", "127.0.0.1:0", "адрес интерфейса (по умолчанию случайный порт)")
 	flag.Parse()
 
 	var store auth.Store = auth.NewKeyring()
@@ -89,8 +90,8 @@ func main() {
 	// роутер целиком защитой по Origin — иначе любая сторонняя вкладка в
 	// том же браузере сможет слать команды на локальный порт демона.
 	srv := httpapi.New(httpapi.OriginGuard(mux))
-	if err := srv.Start(); err != nil {
-		log.Fatalf("не удалось запустить сервер: %v", err)
+	if err := srv.StartOn(*addr); err != nil {
+		log.Fatalf("не удалось запустить сервер на %s: %v", *addr, err)
 	}
 	url := "http://" + srv.Addr()
 	fmt.Printf("плеер слушает %s\n", url)

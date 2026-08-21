@@ -54,7 +54,13 @@ func New(handler http.Handler) *Server {
 
 // Start занимает свободный порт на 127.0.0.1 и начинает обслуживание.
 func (s *Server) Start() error {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	return s.StartOn("127.0.0.1:0")
+}
+
+// StartOn слушает заданный адрес вида host:port. Порт 0 означает
+// эфемерный — фактический адрес потом возвращает Addr.
+func (s *Server) StartOn(addr string) error {
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
 	}
