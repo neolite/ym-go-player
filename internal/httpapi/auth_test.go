@@ -406,3 +406,50 @@ func TestResponsesHaveJSONContentType(t *testing.T) {
 		t.Fatalf("Content-Type = %q, want application/json; charset=utf-8", ct)
 	}
 }
+
+// Прямой юнит-тест redactToken: раньше эта функция была покрыта только
+// косвенно, через HTTP-обработчики, а ветка "token == \"\"" через
+// handleSetToken вообще недостижима — пустой токен отсекается раньше, на
+// входе. Без прямого теста корректность этой ветки была выводом из чтения
+// кода, а не фактом, подтверждённым прогоном.
+func TestRedactToken(t *testing.T) {
+	cases := []struct {
+		name  string
+		err   error
+		token string
+		want  string
+	}{
+		{
+			// Пустой token — защита от ловушки strings.ReplaceAll(s, "", x),
+			// которая иначе вставила бы замену между каждой парой символов
+			// строки. Текст ошибки должен вернуться без изменений.
+			name:  "пустой токен не портит строку",
+			err:   errors.New("keychain: связка ключей недоступна"),
+			token: "",
+			want:  "keychain: связка ключей недоступна",
+		},
+		{
+			name:  "токен в тексте вымаран",
+			err:   errors.New("keychain: SECRET-ABC123 rejected"),
+			token: "SECRET-ABC123",
+			want:  "keychain: <токен вымаран> rejected",
+		},
+		{
+			name:  "текст без токена не испорчен",
+			err:   errors.New("keychain: связка ключей заблокирована"),
+			token: "SECRET-ABC123",
+			want:  "keychain: связка ключей заблокирована",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := redactToken(c.err, c.token)
+			if got != c.want {
+				t.Fatalf("redactToken() = %q, want %q", got, c.want)
+			}
+			if c.token != "" && strings.Contains(got, c.token) {
+				t.Fatalf("redactToken() всё ещё содержит токен: %q", got)
+			}
+		})
+	}
+}
