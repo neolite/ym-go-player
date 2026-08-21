@@ -1,6 +1,7 @@
 package ymapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -29,7 +30,16 @@ var (
 type Client struct {
 	token string
 	base  string
-	http  *http.Client
+	// http — клиент для запросов метаданных (JSON-эндпоинты). Имеет общий
+	// таймаут на весь цикл запроса — эти ответы всегда короткие.
+	http *http.Client
+	// stream — клиент для загрузки потоков (задача 6). У него намеренно нет
+	// общего Timeout: http.Client.Timeout покрывает весь цикл запроса, включая
+	// чтение тела ответа, а трек может качаться дольше 20 секунд на слабой
+	// сети. Вместо этого ограничена только фаза получения заголовков ответа
+	// (ResponseHeaderTimeout) — зависший сервер не держит нас вечно. Отмену
+	// долгой загрузки должен обеспечивать контекст конкретного запроса.
+	stream *http.Client
 }
 
 // New создаёт клиент к боевому API.
@@ -41,11 +51,20 @@ func NewWithBase(token, base string) *Client {
 		token: token,
 		base:  strings.TrimRight(base, "/"),
 		http:  &http.Client{Timeout: 20 * time.Second},
+		stream: &http.Client{
+			Transport: &http.Transport{
+				ResponseHeaderTimeout: 20 * time.Second,
+			},
+		},
 	}
 }
 
-// HTTPClient отдаёт внутренний http.Client для загрузки потоков.
-func (c *Client) HTTPClient() *http.Client { return c.http }
+// HTTPClient отдаёт клиент для потоковой загрузки треков — без общего
+// дедлайна на весь запрос (см. комментарий к полю stream). Единственное
+// назначение этого метода — отдавать именно потоковый клиент; для запросов
+// метаданных пакет использует Get/PostForm/PostJSON, которые берут свой,
+// таймаутированный клиент самостоятельно.
+func (c *Client) HTTPClient() *http.Client { return c.stream }
 
 // Get выполняет GET и разбирает конверт {"result": ...} в out.
 func (c *Client) Get(ctx context.Context, path string, query url.Values, out any) error {
@@ -119,8 +138,13 @@ func (c *Client) do(req *http.Request, out any) error {
 	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
 		return fmt.Errorf("разбор конверта: %w", err)
 	}
-	if len(envelope.Result) == 0 {
-		return errors.New("пустой result в ответе")
+	trimmed := bytes.TrimSpace(envelope.Result)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		// json.Unmarshal([]byte("null"), out) — задокументированный no-op:
+		// он не трогает out и не возвращает ошибку. Если не отсекать этот
+		// случай явно, {"result":null} проходит как валидный пустой ответ,
+		// и вызывающий код получает нулевую структуру вместо диагностики.
+		return errors.New("result в ответе отсутствует или null")
 	}
 	return json.Unmarshal(envelope.Result, out)
 }
