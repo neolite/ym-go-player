@@ -188,6 +188,9 @@
     li.current { background:var(--surface); box-shadow:var(--shadow-s); }
     li.current .idx { color:var(--accent-text); font-weight:700; }
     li.current .name .t { color:var(--accent-text); }
+    /* недоступные в регионе — видны, но приглушены; сервер их пропустит */
+    li.unavailable { opacity:.42; }
+    li.unavailable .name .t { text-decoration:line-through; }
 
     /* --- авторизация --- */
     #auth {

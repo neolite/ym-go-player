@@ -281,6 +281,18 @@ func (a *App) handlePlay(w http.ResponseWriter, r *http.Request) {
 
 	a.Queue.Set(tracks, body.Source)
 	a.resetPosition()
+	// Недоступные в регионе треки пропускаем сразу, не доводя до ошибки
+	// <audio> на фронтенде: очередь продолжается, пользователь получает
+	// сноску (спека §10). Очередь из одних недоступных — честный idle.
+	skipped, landed := a.skipUnavailable()
+	if !landed {
+		a.setStatus(player.StatusIdle, "")
+		if len(skipped) > 0 {
+			a.setWarning(skipWarningText(skipped))
+		}
+		writeJSON(w, http.StatusOK, a.snapshot())
+		return
+	}
 	a.retainBuffer()
 	a.prefetchNext()
 	a.setStatus(player.StatusLoading, "")
@@ -289,6 +301,9 @@ func (a *App) handlePlay(w http.ResponseWriter, r *http.Request) {
 	// проверяет источник и не шлёт ничего для "playlist"/"likes"/"search"/
 	// "tracks": там нет станции, которой это событие было бы адресовано.
 	a.reportTrackStarted()
+	if len(skipped) > 0 {
+		a.setWarning(skipWarningText(skipped))
+	}
 	writeJSON(w, http.StatusOK, a.snapshot())
 }
 
@@ -344,11 +359,27 @@ func (a *App) advanceToNext(ctx context.Context, event string) {
 	// пришлёт в оба канала фидбека десятки/сотни секунд для трека, который
 	// не звучал вовсе.
 	a.resetPosition()
+	skipped, landed := a.skipUnavailable()
+	if !landed {
+		// Хвост очереди — сплошь недоступные треки: играть нечего,
+		// но сноску о пропусках пользователь всё равно обязан увидеть.
+		a.setStatus(player.StatusIdle, "")
+		if len(skipped) > 0 {
+			a.setWarning(skipWarningText(skipped))
+		}
+		return
+	}
 	a.reportTrackStarted()
 	a.refillWave(ctx)
 	a.retainBuffer()
 	a.prefetchNext()
 	a.setStatus(player.StatusLoading, "")
+	// Сноска ставится ПОСЛЕ setStatus: тот перезаписывает errText целиком,
+	// а предупреждение обязано пережить смену статуса и уйти только со
+	// следующим переходом (его setStatus затрёт его сам).
+	if len(skipped) > 0 {
+		a.setWarning(skipWarningText(skipped))
+	}
 }
 
 func (a *App) handlePrev(w http.ResponseWriter, r *http.Request) {
@@ -473,10 +504,24 @@ func (a *App) handleQueueIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.resetPosition()
+	// Клик по недоступному треку — не зависание на ошибке <audio>: идём
+	// к ближайшему доступному следом, с сноской (та же спека §10).
+	skipped, landed := a.skipUnavailable()
+	if !landed {
+		a.setStatus(player.StatusIdle, "")
+		if len(skipped) > 0 {
+			a.setWarning(skipWarningText(skipped))
+		}
+		writeJSON(w, http.StatusOK, a.snapshot())
+		return
+	}
 	a.reportTrackStarted()
 	a.retainBuffer()
 	a.prefetchNext()
 	a.setStatus(player.StatusLoading, "")
+	if len(skipped) > 0 {
+		a.setWarning(skipWarningText(skipped))
+	}
 	writeJSON(w, http.StatusOK, a.snapshot())
 }
 
@@ -544,6 +589,52 @@ func (a *App) retainBuffer() {
 		keep = append(keep, tracks[i].ID)
 	}
 	a.Buffer.Retain(keep...)
+}
+
+// skipUnavailable продвигает очередь вперёд мимо недоступных в регионе
+// треков (Track.Available == false) и возвращает их заголовки для сноски
+// в UI. Спека §10: «трек недоступен в регионе — скип со сноской, очередь
+// продолжается». Пропуск — не прослушивание: ни trackStarted, ни
+// скип-фидбек для такого трека не шлётся, он никогда не был «играющим».
+// ok == false означает, что играть нечего: очередь исчерпана (Queue.Next
+// отказывается выходить за границу, поэтому позиция остаётся на последнем
+// недоступном — только этот флаг отличает «конец» от «стоим на треке»).
+func (a *App) skipUnavailable() (skipped []string, ok bool) {
+	for {
+		cur := a.Queue.Current()
+		if cur == nil {
+			return skipped, false
+		}
+		if cur.Available {
+			return skipped, true
+		}
+		title := cur.Title
+		if title == "" {
+			title = cur.ID
+		}
+		skipped = append(skipped, title)
+		if !a.Queue.Next() {
+			// Хвост сплошь недоступен: уводим позицию за конец, чтобы кадр
+			// состояния не показывал недоступный трек «текущим».
+			a.Queue.Exhaust()
+			return skipped, false
+		}
+	}
+}
+
+// skipWarningText — текст сноски о пропущенных недоступных треках.
+func skipWarningText(skipped []string) string {
+	if len(skipped) == 1 {
+		return fmt.Sprintf("Трек «%s» недоступен в вашем регионе — пропущен", skipped[0])
+	}
+	n := len(skipped)
+	word := "треков"
+	if n%10 == 1 && n%100 != 11 {
+		word = "трек"
+	} else if n%10 >= 2 && n%10 <= 4 && (n%100 < 10 || n%100 >= 20) {
+		word = "трека"
+	}
+	return fmt.Sprintf("Недоступны в вашем регионе и пропущены: %d %s", n, word)
 }
 
 // prefetchNext запускает упреждающую подкачку следующего трека очереди:

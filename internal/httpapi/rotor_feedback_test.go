@@ -88,7 +88,7 @@ func TestHandleNextWithoutBodySendsSkip(t *testing.T) {
 	srv, feedback, _ := newRotorFakeBackend(t)
 	defer srv.Close()
 
-	app := waveApp(srv, []player.Track{{ID: "a", Duration: 200}, {ID: "b", Duration: 180}})
+	app := waveApp(srv, []player.Track{{Available: true, ID: "a", Duration: 200}, {Available: true, ID: "b", Duration: 180}})
 	mux := app.Routes()
 
 	rec := httptest.NewRecorder()
@@ -115,7 +115,7 @@ func TestHandleNextWithReasonFinishedSendsTrackFinished(t *testing.T) {
 	srv, feedback, _ := newRotorFakeBackend(t)
 	defer srv.Close()
 
-	app := waveApp(srv, []player.Track{{ID: "a", Duration: 200}, {ID: "b", Duration: 180}})
+	app := waveApp(srv, []player.Track{{Available: true, ID: "a", Duration: 200}, {Available: true, ID: "b", Duration: 180}})
 	mux := app.Routes()
 
 	rec := httptest.NewRecorder()
@@ -141,7 +141,7 @@ func TestHandleNextSendsTrackStartedForEveryWaveTrack(t *testing.T) {
 	srv, feedback, _ := newRotorFakeBackend(t)
 	defer srv.Close()
 
-	app := waveApp(srv, []player.Track{{ID: "a"}, {ID: "b"}, {ID: "c"}})
+	app := waveApp(srv, []player.Track{{Available: true, ID: "a"}, {Available: true, ID: "b"}, {Available: true, ID: "c"}})
 	mux := app.Routes()
 
 	mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/player/next", nil))
@@ -194,7 +194,7 @@ func TestHandlePrevSendsTrackStartedWhenMoved(t *testing.T) {
 	srv, feedback, _ := newRotorFakeBackend(t)
 	defer srv.Close()
 
-	app := waveApp(srv, []player.Track{{ID: "a"}, {ID: "b"}})
+	app := waveApp(srv, []player.Track{{Available: true, ID: "a"}, {Available: true, ID: "b"}})
 	// встаём на второй трек, чтобы Prev() было куда двигаться
 	app.Queue.Next()
 	mux := app.Routes()
@@ -217,7 +217,7 @@ func TestHandleNextDoesNotPanicWithoutAuth(t *testing.T) {
 	srv, _, _ := newRotorFakeBackend(t)
 	defer srv.Close()
 
-	app := waveApp(srv, []player.Track{{ID: "a"}, {ID: "b"}})
+	app := waveApp(srv, []player.Track{{Available: true, ID: "a"}, {Available: true, ID: "b"}})
 	app.Auth = nil
 	mux := app.Routes()
 
@@ -238,9 +238,9 @@ func TestDoubleNextResetsPositionForNewTrack(t *testing.T) {
 	defer srv.Close()
 
 	app := waveApp(srv, []player.Track{
-		{ID: "a", Duration: 240},
-		{ID: "b", Duration: 200},
-		{ID: "c", Duration: 180},
+		{Available: true, ID: "a", Duration: 240},
+		{Available: true, ID: "b", Duration: 200},
+		{Available: true, ID: "c", Duration: 180},
 	})
 	mux := app.Routes()
 
@@ -298,7 +298,7 @@ func TestHandleQueueIndexMovesWithoutChangingSource(t *testing.T) {
 	srv, feedback, _ := newRotorFakeBackend(t)
 	defer srv.Close()
 
-	app := waveApp(srv, []player.Track{{ID: "a"}, {ID: "b"}, {ID: "c"}})
+	app := waveApp(srv, []player.Track{{Available: true, ID: "a"}, {Available: true, ID: "b"}, {Available: true, ID: "c"}})
 	mux := app.Routes()
 
 	rec := httptest.NewRecorder()
@@ -333,7 +333,7 @@ func TestHandleQueueIndexOutOfRangeReturns400(t *testing.T) {
 	srv, _, _ := newRotorFakeBackend(t)
 	defer srv.Close()
 
-	app := waveApp(srv, []player.Track{{ID: "a"}, {ID: "b"}})
+	app := waveApp(srv, []player.Track{{Available: true, ID: "a"}, {Available: true, ID: "b"}})
 	mux := app.Routes()
 
 	rec := httptest.NewRecorder()

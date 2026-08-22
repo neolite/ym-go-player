@@ -75,7 +75,7 @@ func TestLikeAddsToLibraryAndTeachesWave(t *testing.T) {
 	srv, likes, feedback := newLikeFakeBackend(t)
 	defer srv.Close()
 
-	_, mux := authedWaveApp(t, srv, []player.Track{{ID: "a", Duration: 200}, {ID: "b", Duration: 180}})
+	_, mux := authedWaveApp(t, srv, []player.Track{{Available: true, ID: "a", Duration: 200}, {Available: true, ID: "b", Duration: 180}})
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/tracks/a/like", nil))
@@ -113,7 +113,7 @@ func TestDislikeTeachesWaveAndSkips(t *testing.T) {
 	srv, likes, feedback := newLikeFakeBackend(t)
 	defer srv.Close()
 
-	app, mux := authedWaveApp(t, srv, []player.Track{{ID: "a", Duration: 200}, {ID: "b", Duration: 180}})
+	app, mux := authedWaveApp(t, srv, []player.Track{{Available: true, ID: "a", Duration: 200}, {Available: true, ID: "b", Duration: 180}})
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/tracks/a/dislike", nil))
@@ -149,7 +149,7 @@ func TestUnlikeCallsRemove(t *testing.T) {
 	srv, likes, _ := newLikeFakeBackend(t)
 	defer srv.Close()
 
-	_, mux := authedWaveApp(t, srv, []player.Track{{ID: "a", Duration: 200}})
+	_, mux := authedWaveApp(t, srv, []player.Track{{Available: true, ID: "a", Duration: 200}})
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/tracks/a/like", nil))
@@ -177,7 +177,7 @@ func TestLikeOutsideWaveDoesNotTouchRotor(t *testing.T) {
 	defer srv.Close()
 
 	q := player.NewQueue()
-	q.Set([]player.Track{{ID: "a", Duration: 200}}, "tracks")
+	q.Set([]player.Track{{Available: true, ID: "a", Duration: 200}}, "tracks")
 	plain := &App{
 		Auth:  NewAuth(auth.NewMemory(), okVerify),
 		Queue: q,
@@ -216,7 +216,7 @@ func TestLikeRequiresUID(t *testing.T) {
 	defer srv.Close()
 
 	q := player.NewQueue()
-	q.Set([]player.Track{{ID: "a"}}, "wave")
+	q.Set([]player.Track{{Available: true, ID: "a"}}, "wave")
 	app := &App{
 		Auth:  NewAuth(auth.NewMemory(), okVerify), // токен не верифицирован
 		Queue: q,

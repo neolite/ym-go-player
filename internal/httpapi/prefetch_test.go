@@ -66,7 +66,7 @@ func TestPlayPrefetchesNextTrack(t *testing.T) {
 	_, buf, mux := newPrefetchApp(t, nil)
 
 	rec := httptest.NewRecorder()
-	body := `{"source":"tracks","tracks":[{"id":"a","duration":200},{"id":"b","duration":180}]}`
+	body := `{"source":"tracks","tracks":[{"id":"a","duration":200,"available":true},{"id":"b","duration":180,"available":true}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/play", strings.NewReader(body))
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -79,7 +79,7 @@ func TestPlayPrefetchesNextTrack(t *testing.T) {
 // перехода на «b» подкачиваться обязан уже «c».
 func TestNextPrefetchesUpcomingTrack(t *testing.T) {
 	_, buf, mux := newPrefetchApp(t, []player.Track{
-		{ID: "a", Duration: 200}, {ID: "b", Duration: 180}, {ID: "c", Duration: 170},
+		{Available: true, ID: "a", Duration: 200}, {Available: true, ID: "b", Duration: 180}, {Available: true, ID: "c", Duration: 170},
 	})
 
 	rec := httptest.NewRecorder()
@@ -94,7 +94,7 @@ func TestNextPrefetchesUpcomingTrack(t *testing.T) {
 // обязан взять трек, следующий за выбранным.
 func TestQueueIndexPrefetchesAfterChosen(t *testing.T) {
 	_, buf, mux := newPrefetchApp(t, []player.Track{
-		{ID: "a", Duration: 200}, {ID: "b", Duration: 180}, {ID: "c", Duration: 170},
+		{Available: true, ID: "a", Duration: 200}, {Available: true, ID: "b", Duration: 180}, {Available: true, ID: "c", Duration: 170},
 	})
 
 	rec := httptest.NewRecorder()
@@ -109,7 +109,7 @@ func TestQueueIndexPrefetchesAfterChosen(t *testing.T) {
 // Если следующего трека нет (текущий — последний), префетч обязан молча
 // ничего не делать: не паниковать и не ходить в сеть.
 func TestPrefetchNoopAtQueueEnd(t *testing.T) {
-	_, buf, mux := newPrefetchApp(t, []player.Track{{ID: "a", Duration: 200}})
+	_, buf, mux := newPrefetchApp(t, []player.Track{{Available: true, ID: "a", Duration: 200}})
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/player/next", nil))

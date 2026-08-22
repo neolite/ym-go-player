@@ -74,7 +74,7 @@ func TestRefillWaveFirstFailureSetsWarningSynchronously(t *testing.T) {
 	defer srv.Close()
 
 	q := player.NewQueue()
-	q.Set([]player.Track{{ID: "a"}, {ID: "b"}}, "wave") // Remaining()==1 < 2 → триггерит refill
+	q.Set([]player.Track{{Available: true, ID: "a"}, {Available: true, ID: "b"}}, "wave") // Remaining()==1 < 2 → триггерит refill
 	app := &App{
 		Queue: q,
 		Hub:   NewHub(),
@@ -115,7 +115,7 @@ func TestRefillWaveRetrySucceedsAndClearsWarning(t *testing.T) {
 	defer srv.Close()
 
 	q := player.NewQueue()
-	q.Set([]player.Track{{ID: "a"}, {ID: "b"}}, "wave")
+	q.Set([]player.Track{{Available: true, ID: "a"}, {Available: true, ID: "b"}}, "wave")
 	hub := NewHub()
 	app := &App{
 		Queue: q,
@@ -173,7 +173,7 @@ func TestRefillWaveExhaustsRetriesLeavesWarning(t *testing.T) {
 	defer srv.Close()
 
 	q := player.NewQueue()
-	q.Set([]player.Track{{ID: "a"}, {ID: "b"}}, "wave")
+	q.Set([]player.Track{{Available: true, ID: "a"}, {Available: true, ID: "b"}}, "wave")
 	app := &App{
 		Queue: q,
 		Hub:   NewHub(),

@@ -363,7 +363,13 @@ function render(st: State): void {
     dur.className = "dur";
     dur.textContent = fmtTime(track.duration);
     li.append(idx, qc, name, dur);
-    if (i === st.queueIndex) li.className = "current";
+    // Недоступные в регионе треки видны, но приглушены: сервер их пропустит
+    // (skipUnavailable), список честно показывает, почему цифры прыгают.
+    if (!track.available) {
+      li.classList.add("unavailable");
+      li.title = "Недоступен в вашем регионе";
+    }
+    li.classList.toggle("current", i === st.queueIndex);
     li.addEventListener("click", () => {
       api("/api/play", { source: "tracks", tracks: queue.slice(i) }).catch(() => {});
     });
@@ -373,6 +379,10 @@ function render(st: State): void {
   // Смена трека — единственный повод трогать src: иначе перезапустим текущий.
   if (t && t.id !== currentTrackId) {
     currentTrackId = t.id;
+    // Новый трек закрывает прошлый сетевой откат, если тот ещё тикал.
+    netRetryActive = false;
+    netRetryDelay = 1000;
+    window.clearTimeout(netRetryTimer);
     // Позиция сервера в приоритете; из localStorage — только если демон
     // после перезапуска вернул тот же самый трек (для «волны» это обычно
     // не так, и прыжок в середину чужого трека хуже старта с нуля).
@@ -614,11 +624,25 @@ setInterval(() => {
 // на максимальной скорости.
 let consecutiveFailures = 0;
 
-// Успешный старт снимает и счётчик, и устойчивое сообщение о пределе —
-// оба описывают одно и то же условие ("воспроизведение не идёт"), и оба
-// снимаются одним и тем же событием, которое доказывает, что оно снято.
+// Сетевые откаты (спека §10 «сеть пропала»): обрыв сети — не отказ трека.
+// Поток не скипаем: сеть вернётся, и трек продолжится с той же позиции.
+// Перезапуск идёт с экспоненциальным откатом; до его срабатывания доигрывает
+// то, что уже лежит в буфере <audio>.
+const netErrorMsg = "Нет соединения — воспроизведение восстановится автоматически";
+let netRetryDelay = 1000;
+const maxNetRetryDelay = 30000;
+let netRetryTimer: number | undefined;
+let netRetryActive = false;
+let resumePosOnRetry = 0;
+
+// Успешный старт снимает и счётчик, и сетевой откат, и устойчивое сообщение
+// о пределе — все они описывают одно условие ("воспроизведение не идёт"),
+// и все снимаются одним событием, которое доказывает, что оно снято.
 audio.addEventListener("playing", () => {
   consecutiveFailures = 0;
+  netRetryActive = false;
+  netRetryDelay = 1000;
+  window.clearTimeout(netRetryTimer);
   setFailureError("");
 });
 
@@ -628,12 +652,62 @@ audio.addEventListener("error", () => {
   // src убирается намеренно, когда трека больше нет в состоянии
   // (render → !t) — это не сбой воспроизведения, и считать его не нужно.
   if (!currentTrackId) return;
+  // Демон слушает localhost, поэтому при отвале интернета <audio> получает
+  // 502 прокси (SRC_NOT_SUPPORTED), а не сетевую ошибку элемента — судим по
+  // navigator.onLine, а не только по коду.
+  if (navigator.onLine === false || audio.error?.code === MediaError.MEDIA_ERR_NETWORK) {
+    scheduleNetRetry();
+    return;
+  }
   consecutiveFailures++;
   if (consecutiveFailures >= 3) {
     setFailureError("Не удаётся воспроизвести. Проверьте подписку и токен.");
     return;
   }
+  // Сноска о скипе ошибочного трека (спека §10: «пометить и идти дальше»).
+  showTransientError("Трек не загрузился — пропускаем");
   api("/api/player/next").catch(() => {});
+});
+
+function scheduleNetRetry(): void {
+  // Позицию запоминаем в момент обрыва: после load() элемент обнуляет
+  // currentTime, и перезаписывать сохранённое значение нулём нельзя.
+  if (audio.currentTime > 0) resumePosOnRetry = audio.currentTime;
+  netRetryActive = true;
+  setFailureError(netErrorMsg);
+  window.clearTimeout(netRetryTimer);
+  netRetryTimer = window.setTimeout(retryStream, netRetryDelay);
+  netRetryDelay = Math.min(netRetryDelay * 2, maxNetRetryDelay);
+}
+
+// retryStream перезагружает поток и встаёт на запомненную позицию. Если
+// сети всё ещё нет, ничего не дёргаем — нас разбудит событие online.
+function retryStream(): void {
+  if (!netRetryActive || !currentTrackId) return;
+  if (navigator.onLine === false) return;
+  const onCanPlay = (): void => {
+    audio.removeEventListener("canplay", onCanPlay);
+    audio.currentTime = resumePosOnRetry;
+    audio.play().catch(() => {});
+  };
+  audio.addEventListener("canplay", onCanPlay);
+  audio.load();
+}
+
+window.addEventListener("offline", () => {
+  // Доигрываем буфер — звук не прерываем; индикатор снимет "playing"
+  // (если буфера хватило до возврата сети) или online-ветка ниже.
+  setFailureError(netErrorMsg);
+});
+
+window.addEventListener("online", () => {
+  netRetryDelay = 1000;
+  if (netRetryActive) {
+    retryStream();
+  } else if (stickyFailureError === netErrorMsg) {
+    // Буфера хватило: звук не прерывался, индикатор просто снимаем.
+    setFailureError("");
+  }
 });
 
 checkAuth().then((ok) => { if (ok) connect(); });
