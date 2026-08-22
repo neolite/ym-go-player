@@ -266,15 +266,19 @@ func TestNowUnixFloatSeam(t *testing.T) {
 	}))
 	defer playSrv.Close()
 
+	prevISO := nowISO8601
+	defer func() { nowISO8601 = prevISO }()
+	nowISO8601 = func() string { return "2001-09-09T01:46:40.500Z" }
+
 	if err := NewWithBase("t", playSrv.URL).PlayAudio(context.Background(), PlayEvent{
 		TrackID: "101", AlbumID: "9", From: "wave",
 	}); err != nil {
 		t.Fatalf("PlayAudio: %v", err)
 	}
-	if v := form["timestamp"]; len(v) == 0 || v[0] != "1000000000.50" {
-		t.Fatalf("timestamp = %v, want 1000000000.50", form["timestamp"])
+	if v := form["timestamp"]; len(v) == 0 || v[0] != "2001-09-09T01:46:40.500Z" {
+		t.Fatalf("timestamp = %v, want 2001-09-09T01:46:40.500Z", form["timestamp"])
 	}
-	if v := form["client-now"]; len(v) == 0 || v[0] != "1000000000.50" {
-		t.Fatalf("client-now = %v, want 1000000000.50", form["client-now"])
+	if v := form["client-now"]; len(v) == 0 || v[0] != "2001-09-09T01:46:40.500Z" {
+		t.Fatalf("client-now = %v, want 2001-09-09T01:46:40.500Z", form["client-now"])
 	}
 }

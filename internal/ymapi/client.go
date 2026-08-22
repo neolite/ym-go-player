@@ -162,3 +162,9 @@ func (c *Client) do(req *http.Request, out any) error {
 var nowUnixFloat = func() float64 {
 	return float64(time.Now().UnixNano()) / 1e9
 }
+
+// nowISO8601 — то же для канала /play-audio: он требует ISO 8601
+// с миллисекундами (YYYY-MM-DDThh:mm:ss.SSSZ), а не unix-метку.
+var nowISO8601 = func() string {
+	return time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
+}

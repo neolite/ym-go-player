@@ -63,9 +63,11 @@ type PlayEvent struct {
 // Это второй, независимый от ротора канал: он питает рекомендации аккаунта
 // целиком, а не только волну.
 //
-// Состав полей формы не подтверждён первоисточником (docs/research/custom-yandex-music-player.md,
-// раздел 7 помечает путь и параметры /play-audio как непроверенные) и
-// подлежит проверке на живом сервисе в задаче 14.
+// timestamp и client-now идут в формате ISO 8601 с миллисекундами
+// (YYYY-MM-DDThh:mm:ss.SSSZ) — так подтверждает исходник MarshalX
+// (yandex_music/_client_async/tracks.py, play_audio) и живой сервис:
+// на unix-метку он отвечает 400 invalid-timestamp («Please use
+// YYYY-MM-DDThh:mm:ss.SSSZ timestamp format»).
 func (c *Client) PlayAudio(ctx context.Context, ev PlayEvent) error {
 	uid := ""
 	if ev.UID != 0 {
@@ -75,17 +77,18 @@ func (c *Client) PlayAudio(ctx context.Context, ev PlayEvent) error {
 	if playID == "" {
 		playID = ev.TrackID + "_" + ev.AlbumID + "_" + formatFloat(nowUnixFloat())
 	}
+	now := nowISO8601()
 	form := url.Values{
 		"track-id":             {ev.TrackID},
 		"album-id":             {ev.AlbumID},
 		"from":                 {ev.From},
 		"play-id":              {playID},
 		"uid":                  {uid},
-		"timestamp":            {formatFloat(nowUnixFloat())},
+		"timestamp":            {now},
 		"track-length-seconds": {formatFloat(ev.TotalSeconds)},
 		"total-played-seconds": {formatFloat(ev.PlayedSeconds)},
 		"end-position-seconds": {formatFloat(ev.PlayedSeconds)},
-		"client-now":           {formatFloat(nowUnixFloat())},
+		"client-now":           {now},
 	}
 	return c.PostForm(ctx, "/play-audio", form, nil)
 }
