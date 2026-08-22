@@ -3,3 +3,4 @@ web/dist/
 .DS_Store
 internal/httpapi/dist/*
 !internal/httpapi/dist/.gitkeep
+/musicapp
