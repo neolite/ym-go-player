@@ -404,3 +404,75 @@ func TestProxyLeaderCancellationDoesNotAffectWaiters(t *testing.T) {
 	}
 	<-leaderDone
 }
+
+// Префетч качает следующий трек в буфер заранее: когда фронтенд попросит
+// его через ServeTrack, байты уже на месте и к источнику идти не надо.
+func TestPrefetchBuffersTrack(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("NEXTBYTES"))
+	}))
+	defer origin.Close()
+
+	buf := NewBuffer(1024)
+	p := NewProxy(&fakeResolver{url: origin.URL}, buf, origin.Client())
+	p.Prefetch("next")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		data, ok := buf.Get("next")
+		if ok {
+			if string(data) != "NEXTBYTES" {
+				t.Fatalf("буфер после префетча = %q, want NEXTBYTES", data)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("префетч не наполнил буфер за 2 секунды")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// После префетча ServeTrack обязан отдать байты из буфера, не трогая
+	// источник повторно.
+	origin.Close()
+	rec := httptest.NewRecorder()
+	p.ServeTrack(rec, httptest.NewRequest(http.MethodGet, "/stream/next", nil), "next")
+	if rec.Code != http.StatusOK || rec.Body.String() != "NEXTBYTES" {
+		t.Fatalf("ServeTrack после префетча: code = %d, body = %q", rec.Code, rec.Body.String())
+	}
+}
+
+// Префетч трека, который уже в буфере, не должен порождать лишнее
+// обращение к резолверу — проверка буфера идёт до запуска горутины.
+func TestPrefetchSkipsBufferedTrack(t *testing.T) {
+	res := &fakeResolver{} // url пуст: любое обращение упадёт с "нет ссылки"
+	buf := NewBuffer(1024)
+	buf.Put("cur", []byte("X"))
+	p := NewProxy(res, buf, nil)
+	p.Prefetch("cur")
+	if got := atomic.LoadInt32(&res.calls); got != 0 {
+		t.Fatalf("резолвер дёрнут %d раз для уже лежащего в буфере трека, want 0", got)
+	}
+}
+
+// Сбой префетча (источник недоступен) не паникует и не мешает последующему
+// ServeTrack честно вернуть ошибку — префетч лишь логирует.
+func TestPrefetchFailureStaysBackground(t *testing.T) {
+	res := &fakeResolver{} // резолв всегда падает
+	buf := NewBuffer(1024)
+	p := NewProxy(res, buf, nil)
+	p.Prefetch("gone")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for atomic.LoadInt32(&res.calls) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("префетч не дошёл до резолвера")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	rec := httptest.NewRecorder()
+	p.ServeTrack(rec, httptest.NewRequest(http.MethodGet, "/stream/gone", nil), "gone")
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("code = %d, want 502", rec.Code)
+	}
+}

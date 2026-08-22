@@ -282,6 +282,7 @@ func (a *App) handlePlay(w http.ResponseWriter, r *http.Request) {
 	a.Queue.Set(tracks, body.Source)
 	a.resetPosition()
 	a.retainBuffer()
+	a.prefetchNext()
 	a.setStatus(player.StatusLoading, "")
 	// trackStarted обязан уйти для каждого трека волны, включая первый —
 	// раньше (находка 1) он не уходил вовсе. reportTrackStarted сама
@@ -346,6 +347,7 @@ func (a *App) advanceToNext(ctx context.Context, event string) {
 	a.reportTrackStarted()
 	a.refillWave(ctx)
 	a.retainBuffer()
+	a.prefetchNext()
 	a.setStatus(player.StatusLoading, "")
 }
 
@@ -355,6 +357,7 @@ func (a *App) handlePrev(w http.ResponseWriter, r *http.Request) {
 		a.reportTrackStarted()
 	}
 	a.retainBuffer()
+	a.prefetchNext()
 	a.setStatus(player.StatusLoading, "")
 	writeJSON(w, http.StatusOK, a.snapshot())
 }
@@ -472,6 +475,7 @@ func (a *App) handleQueueIndex(w http.ResponseWriter, r *http.Request) {
 	a.resetPosition()
 	a.reportTrackStarted()
 	a.retainBuffer()
+	a.prefetchNext()
 	a.setStatus(player.StatusLoading, "")
 	writeJSON(w, http.StatusOK, a.snapshot())
 }
@@ -542,6 +546,21 @@ func (a *App) retainBuffer() {
 	a.Buffer.Retain(keep...)
 }
 
+// prefetchNext запускает упреждающую подкачку следующего трека очереди:
+// пока играет текущий (обычно минуты), следующий уже лежит в буфере, и
+// переход не ждёт сеть. Зовётся вслед за retainBuffer в каждой точке
+// смены позиции — обе функции читают один и тот же срез очереди.
+func (a *App) prefetchNext() {
+	if a.Proxy == nil {
+		return
+	}
+	tracks, idx, _ := a.Queue.Snapshot()
+	if idx+1 >= len(tracks) {
+		return
+	}
+	a.Proxy.Prefetch(tracks[idx+1].ID)
+}
+
 // refillWaveBackoff задаёт паузы между повторными попытками подкачки
 // батча ротора после первой неудачи. Переменная пакета, а не константа:
 // тесты подменяют её на короткие паузы, чтобы не ждать реальное время —
@@ -583,6 +602,11 @@ func (a *App) refillWave(ctx context.Context) {
 		a.batchID = batch.BatchID
 		a.mu.Unlock()
 		a.Queue.Append(batch.Tracks)
+		// refillWave срабатывает, когда следующего трека в очереди ещё не
+		// было — prefetchNext на прошлом переходе нечего было качать. После
+		// дозаливки батча он появился: подкачиваем его сразу, иначе первый
+		// трек каждого батча оставался бы без префетча.
+		a.prefetchNext()
 		return
 	}
 	log.Printf("ротор: подкачка батча волны не удалась: %v", err)
@@ -607,6 +631,7 @@ func (a *App) retryRefillWave(c *ymapi.Client, lastTrackID string) {
 				a.batchID = batch.BatchID
 				a.mu.Unlock()
 				a.Queue.Append(batch.Tracks)
+				a.prefetchNext() // как в refillWave: появившийся следующий трек качаем сразу
 				a.clearWarning(refillWaveWarning)
 				return nil
 			}
