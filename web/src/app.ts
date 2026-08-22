@@ -146,14 +146,15 @@ async function api(path: string, body?: unknown): Promise<any> {
 
 // --- тема ---
 //
-// Четыре темы, переключаемые циклом: базовая SF → кислотная → лаборатория
-// (иммерсивная) → blok (пост-советский брутализм). Это чисто визуальные
+// Пять тем, переключаемых циклом: базовая SF → кислотная → лаборатория
+// (иммерсивная) → blok (пост-советский брутализм) → neon (глубокий синий,
+// люминесцентные глифы). Это чисто визуальные
 // слои (класс на <body>), логику плеера не трогают. Выбор хранится в
 // localStorage и применяется до первого кадра SSE, чтобы интерфейс не
 // мигал другой темой при загрузке.
 
 const THEME_KEY = "music212.theme";
-const THEMES = ["", "acid", "lab", "blok"];
+const THEMES = ["", "acid", "lab", "blok", "neon"];
 let currentTheme = "";
 
 function applyTheme(theme: string, persist = true): void {
@@ -161,13 +162,15 @@ function applyTheme(theme: string, persist = true): void {
   document.body.classList.toggle("acid", theme === "acid");
   document.body.classList.toggle("lab", theme === "lab");
   document.body.classList.toggle("blok", theme === "blok");
+  document.body.classList.toggle("neon", theme === "neon");
   if (!persist) return;
   try { localStorage.setItem(THEME_KEY, theme); } catch { /* приватный режим — тема просто не запомнится */ }
 }
 
-// Якорь вида #theme-lab / #theme-acid / #theme-blok включает тему разово,
+// Якорь вида #theme-lab / #theme-acid / #theme-blok / #theme-neon включает
+// тему разово,
 // не трогая сохранённый выбор, — удобно для ссылок-демо и headless-проверок.
-const hashTheme = location.hash.match(/^#theme-(acid|lab|blok)$/);
+const hashTheme = location.hash.match(/^#theme-(acid|lab|blok|neon)$/);
 try {
   applyTheme(hashTheme ? hashTheme[1] : (localStorage.getItem(THEME_KEY) ?? ""), !hashTheme);
 } catch { /* нет localStorage — остаётся базовая тема */ }

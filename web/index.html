@@ -91,8 +91,10 @@
     #btnTheme svg { width:15px; height:15px; fill:currentColor; }
     #btnTheme:hover { color:var(--fg); transform:rotate(15deg); }
 
-    /* элементы экспериментальной темы lab — в базовой скрыты */
-    #bgArt, #bigTime, li .qcover { display:none; }
+    /* элементы экспериментальных тем — в базовой скрыты:
+       #bgArt (размытая обложка, lab), #bigTime (lab), .qcover (lab),
+       #bgLines (анимированные линии фона, neon) */
+    #bgArt, #bigTime, li .qcover, #bgLines { display:none; }
 
     #errorBar {
       margin:-12px 0 20px; padding:11px 16px; border-radius:12px;
@@ -511,6 +513,195 @@
     body.blok #tokenSave { border-radius:0; background:var(--accent); text-transform:uppercase; font-weight:900; letter-spacing:.08em; box-shadow:none; }
     body.blok #tokenSave:hover { background:#111; transform:none; filter:none; }
 
+    /* --- neon: глубокий синий + люминесцентные глифы (четвёртая тема цикла) ---
+	       По референсам: чистые цвета MODAK (электрик-синий, кислотный лайм,
+	       розовый), светящиеся «желейные» иконки, градиентные глифы MAX,
+	       гигантская жирная курсивная типографика. Всегда тёмная. */
+    body.neon {
+      background:#0c1190;
+      --bg:#0c1190; --surface:#ffffff14; --surface2:#ffffff0d;
+      --fg:#ffffff; --dim:#c7ccff; --faint:#8b92e8;
+      --accent:#e8ff1e; --accent-text:#e8ff1e; --on-accent:#0c1190;
+      --neon-pink:#ff9ad5; --neon-cyan:#5ff5ff;
+      --line:#ffffff1f; --line-strong:#ffffff30;
+      --err-bg:#ff9ad51f; --err-fg:#ffb3d1;
+    }
+    /* световые пятна — циан и розовый вместо фиолетового */
+    body.neon::before {
+      background:
+        radial-gradient(700px 500px at 88% -12%, #5ff5ff26, transparent 70%),
+        radial-gradient(640px 460px at -12% 34%, #ff9ad51c, transparent 70%),
+        radial-gradient(900px 700px at 50% 115%, #e8ff1e14, transparent 70%);
+    }
+    /* вертикальный водяной знак контуром — как лого на банке MODAK */
+    body.neon::after {
+      content:"МУЗЫКА"; position:fixed; right:-.28em; top:50%; z-index:-1;
+      transform:translateY(-50%) rotate(90deg); pointer-events:none;
+      font-size:min(24vh,220px); font-weight:900; font-style:italic;
+      letter-spacing:.04em; color:transparent;
+      -webkit-text-stroke:1.5px #ffffff17;
+    }
+    /* анимированные линии фона: тонкие дрейфующие штрихи (псевдоэлемент)
+	       и большие контурные кривые, которые медленно «прорисовываются»
+	       (stroke-dashoffset). Цвета — неоновая палитра, прозрачность низкая:
+	       линии — фактура, не центр внимания. */
+    body.neon #bgLines { display:block; position:fixed; inset:0; z-index:-1; pointer-events:none; overflow:hidden; }
+    body.neon #bgLines::before {
+      content:""; position:absolute; inset:-60%;
+      background:repeating-linear-gradient(115deg, transparent 0 46px, #5ff5ff10 46px 47.5px, transparent 47.5px 92px);
+      animation:lineDrift 70s linear infinite;
+    }
+    @keyframes lineDrift {
+      from { transform:translate3d(-4%,0,0); }
+      to { transform:translate3d(4%,0,0); }
+    }
+    body.neon #bgLines svg {
+      position:absolute; inset:0; width:100%; height:100%;
+      filter:drop-shadow(0 0 7px #5ff5ff1f);
+      animation:lineSway 44s ease-in-out infinite alternate;
+    }
+    @keyframes lineSway {
+      from { transform:translate3d(-1.5%,-1%,0) scale(1.04); }
+      to { transform:translate3d(1.5%,1%,0) scale(1.1); }
+    }
+    body.neon #bgLines path {
+      fill:none; stroke-width:1.6;
+      stroke-dasharray:2400; stroke-dashoffset:2400;
+      animation:lineDraw 46s ease-in-out infinite alternate;
+    }
+    body.neon #bgLines path:nth-child(1) { stroke:#5ff5ff38; animation-duration:52s; }
+    body.neon #bgLines path:nth-child(2) { stroke:#ff9ad52e; animation-duration:44s; animation-delay:-12s; }
+    body.neon #bgLines path:nth-child(3) { stroke:#5ff5ff26; animation-duration:58s; animation-delay:-25s; }
+    body.neon #bgLines path:nth-child(4) { stroke:#e8ff1e21; animation-duration:40s; animation-delay:-7s; }
+    body.neon #bgLines path:nth-child(5) { stroke:#ff9ad521; animation-duration:63s; animation-delay:-31s; }
+    @keyframes lineDraw {
+      from { stroke-dashoffset:2400; }
+      to { stroke-dashoffset:-2400; }
+    }
+
+    body.neon #app { max-width:860px; padding-top:40px; }
+    body.neon header { background:none; border-bottom:none; backdrop-filter:none; -webkit-backdrop-filter:none; }
+    body.neon .sources { background:none; padding:0; gap:8px; }
+    body.neon .sources button {
+      text-transform:uppercase; font-weight:800; font-size:12.5px; letter-spacing:.12em;
+      color:var(--dim); border:1.5px solid var(--line); border-radius:999px;
+      padding:9px 18px;
+      transition:color .2s var(--ease), border-color .2s var(--ease), box-shadow .25s var(--ease), background .2s var(--ease);
+    }
+    body.neon .sources button:hover { color:#fff; border-color:var(--neon-cyan); box-shadow:0 0 18px #5ff5ff40; }
+    body.neon .sources button.active {
+      background:var(--accent); border-color:var(--accent); color:var(--on-accent);
+      box-shadow:0 0 26px #e8ff1e59;
+    }
+    body.neon #search {
+      background:#ffffff0d; border:1.5px solid var(--line); color:#fff; border-radius:999px;
+    }
+    body.neon #search::placeholder { color:var(--faint); }
+    body.neon #search:focus { border-color:var(--neon-cyan); background:#ffffff14; box-shadow:0 0 22px #5ff5ff38; }
+    body.neon #btnTheme { background:#ffffff0d; border:1.5px solid var(--line); color:var(--dim); border-radius:999px; }
+    body.neon #btnTheme:hover { color:var(--accent); border-color:var(--accent); box-shadow:0 0 18px #e8ff1e40; transform:rotate(15deg); }
+
+    body.neon #now { align-items:center; gap:42px; margin:3vh 0 5vh; }
+    body.neon #cover {
+      width:min(300px,36vw); height:auto; aspect-ratio:1; border-radius:26px;
+      box-shadow:0 24px 70px #0000008c, 0 0 44px #5ff5ff21;
+      transition:transform .3s var(--ease), box-shadow .3s var(--ease);
+    }
+    body.neon #cover:hover { transform:scale(1.03) rotate(.6deg); box-shadow:0 28px 80px #000000a1, 0 0 60px #ff9ad533; }
+    body.neon #title {
+      font-size:clamp(40px,5.6vw,64px); font-weight:900; font-style:italic;
+      letter-spacing:-.035em; line-height:1.0; color:#fff;
+      text-shadow:0 0 34px #5ff5ff40;
+    }
+    body.neon #artist { font-size:19px; font-weight:600; color:var(--neon-pink); margin-bottom:10px; }
+
+    /* прогресс — градиентный глиф циан→розовый→лайм со свечением;
+	       подписи времени прячем, остаётся чистая линия */
+    body.neon #progressWrap { margin-bottom:28px; }
+    body.neon #progressWrap .time { display:none; }
+    body.neon #progress { height:30px; }
+    body.neon #progress::-webkit-slider-runnable-track {
+      height:10px; border-radius:6px;
+      background:linear-gradient(90deg,#5ff5ff,#ff9ad5 55%,#e8ff1e var(--fill,0%),#ffffff1c var(--fill,0%));
+      box-shadow:0 0 18px #ff9ad52e;
+    }
+    body.neon #progress::-webkit-slider-thumb {
+      width:20px; height:20px; margin-top:-5px; background:#fff;
+      box-shadow:0 0 16px #ffffffb3, 0 0 34px #5ff5ff80;
+    }
+    body.neon #progress::-moz-range-track { height:10px; border-radius:6px; background:#ffffff1c; }
+    body.neon #progress::-moz-range-progress {
+      height:10px; border-radius:6px;
+      background:linear-gradient(90deg,#5ff5ff,#ff9ad5 55%,#e8ff1e);
+      box-shadow:0 0 18px #ff9ad52e;
+    }
+    body.neon #progress::-moz-range-thumb { width:20px; height:20px; border:none; background:#fff; box-shadow:0 0 16px #ffffffb3, 0 0 34px #5ff5ff80; }
+
+    /* транспорт — люминесцентное «желе»: полупрозрачная заливка,
+	       внутренний блик и внешнее свечение при наведении */
+    body.neon #controls { gap:16px; }
+    body.neon .tbtn {
+      background:#ffffff0f; color:#e8ebff; border:1.5px solid var(--line);
+      box-shadow:inset 0 1px 0 #ffffff21;
+      backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);
+      transition:box-shadow .25s var(--ease), transform .2s var(--ease), color .2s var(--ease), border-color .2s var(--ease);
+    }
+    body.neon .tbtn svg { filter:drop-shadow(0 0 6px #5ff5ff59); }
+    body.neon .tbtn:hover {
+      color:#fff; border-color:var(--neon-cyan);
+      box-shadow:inset 0 1px 0 #ffffff2e, 0 0 26px #5ff5ff52;
+      transform:translateY(-2px);
+    }
+    body.neon #btnDislike:hover { color:var(--neon-cyan); }
+    body.neon #btnLike:hover { color:var(--neon-pink); border-color:var(--neon-pink); box-shadow:inset 0 1px 0 #ffffff2e, 0 0 26px #ff9ad55c; }
+    body.neon #btnLike:hover svg { filter:drop-shadow(0 0 8px #ff9ad5a6); }
+    body.neon #btnDislike:hover svg { filter:drop-shadow(0 0 8px #5ff5ffa6); }
+    body.neon #btnPlay {
+      width:84px; height:84px; border:none;
+      background:var(--accent); color:var(--on-accent);
+      box-shadow:0 0 44px #e8ff1e66, 0 14px 40px #00000061;
+    }
+    body.neon #btnPlay svg { width:34px; height:34px; filter:none; }
+    body.neon #btnPlay:hover { transform:scale(1.07); box-shadow:0 0 64px #e8ff1e8c, 0 16px 44px #00000070; filter:none; }
+    body.neon #volumeWrap { color:var(--faint); }
+    body.neon #volumeWrap svg { filter:drop-shadow(0 0 6px #5ff5ff40); }
+    body.neon #volume::-webkit-slider-runnable-track { background:#ffffff2b; }
+    body.neon #volume::-webkit-slider-thumb { background:var(--neon-cyan); box-shadow:0 0 10px #5ff5ff8c; }
+    body.neon #volume::-moz-range-track { background:#ffffff2b; }
+    body.neon #volume::-moz-range-thumb { border:none; background:var(--neon-cyan); box-shadow:0 0 10px #5ff5ff8c; }
+
+    /* очередь — стеклянные строки, текущий трек подсвечен лаймом */
+    body.neon li { border-radius:16px; border:1.5px solid transparent; }
+    body.neon li:hover { background:#ffffff0f; box-shadow:inset 0 1px 0 #ffffff1a, 0 0 20px #5ff5ff1f; }
+    body.neon li .idx { font-weight:800; font-style:italic; color:var(--neon-pink); }
+    body.neon li .name .t { font-weight:650; }
+    body.neon li .name .a { color:var(--dim); }
+    body.neon li.current { background:#ffffff10; border-color:#e8ff1e59; box-shadow:0 0 24px #e8ff1e21; }
+    body.neon li.current .idx { color:var(--accent); }
+    body.neon li.current .name .t { color:var(--accent); text-shadow:0 0 14px #e8ff1e59; }
+
+    body.neon #errorBar {
+      background:#ff9ad514; border:1.5px solid #ff9ad54d; color:var(--err-fg); border-radius:14px;
+    }
+    body.neon #auth {
+      background:#ffffff0d; border:1.5px solid var(--line); border-radius:26px;
+      box-shadow:0 30px 80px #0000006b, inset 0 1px 0 #ffffff21;
+      backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px);
+    }
+    body.neon #auth a { color:var(--neon-cyan); }
+    body.neon #auth code { background:#ffffff14; }
+    body.neon #tokenInput { background:#ffffff0d; border:1.5px solid var(--line); color:#fff; }
+    body.neon #tokenInput:focus { border-color:var(--neon-cyan); background:#ffffff14; box-shadow:0 0 22px #5ff5ff38; }
+    body.neon #tokenSave { background:var(--accent); color:var(--on-accent); box-shadow:0 0 26px #e8ff1e52; font-weight:800; }
+    body.neon #tokenSave:hover { box-shadow:0 0 40px #e8ff1e7a; filter:none; }
+
+    @media (max-width:560px) {
+      body.neon #now { flex-direction:column; gap:20px; margin-top:3vh; }
+      body.neon #cover { width:min(70vw,280px); }
+      body.neon #title { font-size:32px; }
+      body.neon::after { font-size:34vw; right:-.4em; }
+    }
+
     /* --- мобильный --- */
     @media (max-width:560px) {
       #app { padding:14px 14px 48px; }
@@ -532,6 +723,15 @@
 </head>
 <body>
   <div id="bgArt" aria-hidden="true"></div>
+  <div id="bgLines" aria-hidden="true">
+    <svg viewBox="0 0 1200 800" preserveAspectRatio="xMidYMid slice" focusable="false">
+      <path d="M-60 640 C 240 480, 420 780, 700 620 S 1080 420, 1320 570"/>
+      <path d="M-60 510 C 260 350, 470 660, 760 490 S 1130 300, 1320 430"/>
+      <path d="M-60 380 C 300 220, 540 540, 830 340 S 1160 170, 1320 280"/>
+      <path d="M-60 250 C 330 100, 570 410, 890 210 S 1190 50, 1320 140"/>
+      <path d="M-60 720 C 200 630, 500 830, 790 710 S 1100 570, 1320 680"/>
+    </svg>
+  </div>
   <div id="auth" class="hidden">
     <h2>Нужен токен</h2>
     <p>Откройте <a id="authLink" target="_blank" rel="noopener">страницу входа Яндекса</a>,
