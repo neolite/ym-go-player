@@ -219,3 +219,106 @@ func TestClearWarningDoesNotClobberUnrelatedError(t *testing.T) {
 		t.Fatalf("errText = %q, хотим сохранённую настоящую ошибку", got)
 	}
 }
+
+// --- ре-ревью: пустой батч и устаревший повтор.
+
+// Пустая порция от ротора (успешный ответ с пустым sequence) — тот же
+// отказ, что и сетевая ошибка: предупреждение и повторы, а не молчаливое
+// «всё хорошо» с нулём новых треков, после которого волна доигрывала
+// остаток и вставала без объяснений.
+func TestRefillWaveEmptyBatchIsFailure(t *testing.T) {
+	withShortRefillBackoff(t)
+
+	sw := newMarkerWriter("повтор подкачки батча волны")
+	prevOutput := log.Writer()
+	log.SetOutput(sw)
+	defer log.SetOutput(prevOutput)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"result":{"batchId":"batch-empty","sequence":[]}}`))
+	}))
+	defer srv.Close()
+
+	q := player.NewQueue()
+	q.Set([]player.Track{{Available: true, ID: "a"}, {Available: true, ID: "b"}}, "wave")
+	app := &App{
+		Queue: q,
+		Hub:   NewHub(),
+		Client: func() (*ymapi.Client, error) {
+			return ymapi.NewWithBase("t", srv.URL), nil
+		},
+	}
+
+	app.refillWave(context.Background())
+
+	app.mu.RLock()
+	warn := app.errText
+	app.mu.RUnlock()
+	if warn != refillWaveWarning {
+		t.Fatalf("errText = %q, want %q", warn, refillWaveWarning)
+	}
+	select {
+	case <-sw.done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("не дождались исчерпания повторов на пустом батче")
+	}
+	tracks, _, _ := q.Snapshot()
+	if len(tracks) != 2 {
+		t.Fatalf("пустой батч не должен был ничего добавить, len(tracks) = %d, want 2", len(tracks))
+	}
+}
+
+// Пока фоновый повтор ждёт паузу, очередь может уйти из-под него: волна →
+// плейлист. Успешный запоздалый ответ ротора НЕ должен долить треки волны
+// в чужую очередь — иначе плейлист пользователя окажется перемешан с
+// выдачей станции.
+func TestRetryRefillDropsBatchAfterSourceChange(t *testing.T) {
+	// Пауза достаточно длинная, чтобы между синхронной неудачей и повтором
+	// гарантированно успеть сменить источник.
+	prev := refillWaveBackoff
+	refillWaveBackoff = []time.Duration{100 * time.Millisecond}
+	t.Cleanup(func() { refillWaveBackoff = prev })
+
+	var attempt atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempt.Add(1) == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Write([]byte(stationTracksFixture))
+	}))
+	defer srv.Close()
+
+	q := player.NewQueue()
+	q.Set([]player.Track{{Available: true, ID: "a"}, {Available: true, ID: "b"}}, "wave")
+	app := &App{
+		Queue: q,
+		Hub:   NewHub(),
+		Client: func() (*ymapi.Client, error) {
+			return ymapi.NewWithBase("t", srv.URL), nil
+		},
+	}
+
+	app.refillWave(context.Background()) // синхронная неудача, повтор ушёл в фон
+
+	// Пользователь запустил плейлист до срабатывания повтора.
+	q.Set([]player.Track{{Available: true, ID: "x"}, {Available: true, ID: "y"}}, "playlist")
+
+	// Ждём, пока повтор точно сходил в сеть, и даём горутине завершиться.
+	deadline := time.Now().Add(3 * time.Second)
+	for attempt.Load() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("повтор так и не сходил в сеть")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	tracks, _, source := q.Snapshot()
+	if source != "playlist" {
+		t.Fatalf("source = %q, want playlist", source)
+	}
+	if len(tracks) != 2 {
+		t.Fatalf("устаревший батч волны не должен был долиться в чужую очередь, len(tracks) = %d, want 2", len(tracks))
+	}
+}

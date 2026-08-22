@@ -48,9 +48,11 @@ audio.addEventListener("loadedmetadata", () => {
 // - setStateError / setFailureError — ОШИБКА-СОСТОЯНИЕ (State.error из SSE
 //   и сообщение о пределе неудач воспроизведения соответственно). Это не
 //   событие, а описание текущего положения дел, которое остаётся верным,
-//   пока его явно не снимут: SSE-кадры идут по изменению состояния, а не
-//   периодически, так что для "устойчивой" ошибки никто не пришлёт её
-//   заново, и таймер, стирающий её через 4с, вернёт пользователя в то самое
+//   пока его явно не снимут. Таймер автоскрытия здесь неуместен при любом
+//   режиме потока кадров: во время воспроизведения handleProgress публикует
+//   кадр каждые 5 с, и каждый несёт тот же error — таймер не скрывал бы
+//   ошибку, а заставлял бы её мигать; вне воспроизведения кадры идут по
+//   изменению состояния, и таймер вернул бы пользователя в то самое
 //   молчаливо сломанное состояние, ради избежания которого её вообще
 //   показывали. Отдельные слоты для устойчивых источников — потому что у
 //   них разные условия снятия (новый кадр без error / событие "playing" /
@@ -111,9 +113,11 @@ function setAuthWarning(message: string): void {
   paintErrorBar();
 }
 
-// Все маршруты, которые вызывает api(), — POST (routes.go:46-52); GET-роуты
-// (/api/playlists, /api/likes, /api/search) идут отдельным fetch мимо этой
-// функции. method обязан быть POST всегда, а не только когда есть тело:
+// Все маршруты, которые вызывает api(), — POST (routes.go:48-58). Из
+// GET-роутов фронтенд вызывает только /api/playlists — отдельным fetch
+// мимо этой функции; /api/likes и /api/search из фронта не вызываются
+// вовсе (поиск идёт через POST /api/play с source:"search"). method обязан
+// быть POST всегда, а не только когда есть тело:
 // fetch(path, {}) без явного method уходит GET, и без тела (next/prev/
 // pause/resume) все эти вызовы получали 404.
 // Текст ошибки из ответа сервера. apiError в routes.go шлёт JSON вида
@@ -338,6 +342,18 @@ function render(st: State): void {
   // снимается ровно тем кадром, где error снова пуст.
   setStateError(st.error ?? "");
 
+  // Громкость между перезагрузками страницы помнит только сервер — после
+  // перезагрузки <audio> и ползунок всегда стартуют с 1.0. Применяем её из
+  // кадра, но не во время жеста (volumeDragging). Нуль трактуем как «не
+  // задано»: у демона нет отдельного признака, что громкость когда-либо
+  // выставляли, и свежий процесс шлёт 0 — применение его глушило бы звук
+  // на каждой загрузке. Цена допущения: намеренная тишина (volume = 0)
+  // перезагрузку страницы не переживает.
+  if (!volumeDragging && st.volume > 0) {
+    audio.volume = st.volume;
+    volumeEl.value = String(st.volume);
+  }
+
   listEl.innerHTML = "";
   queue.forEach((track, i) => {
     const li = document.createElement("li");
@@ -372,7 +388,14 @@ function render(st: State): void {
     }
     li.classList.toggle("current", i === st.queueIndex);
     li.addEventListener("click", () => {
-      api("/api/play", { source: "tracks", tracks: queue.slice(i) }).catch(() => {});
+      // Клик по треку ТЕКУЩЕЙ очереди — это переход внутри неё
+      // (handleQueueIndex): очередь и её source не меняются, поэтому для
+      // волны продолжают работать подкачка батчей (refillWave) и фидбек
+      // ротора — оба гейтятся на source == "wave". Ставить здесь новую
+      // очередь через /api/play {"source":"tracks"} нельзя: после этого оба
+      // механизма отключились бы навсегда. /api/play со свежим списком —
+      // только для новых источников (плейлисты, «Мне нравится», поиск).
+      api("/api/player/queue-index", { index: i }).catch(() => {});
     });
     listEl.appendChild(li);
   });
@@ -521,8 +544,19 @@ $("search").addEventListener("keydown", (e) => {
   if (q) api("/api/play", { source: "search", query: q }).catch(() => {});
 });
 
-$("volume").addEventListener("input", () => {
-  const v = parseFloat(($("volume") as HTMLInputElement).value);
+// Ползунок громкости ведёт себя как ползунок прогресса: пока его держат,
+// фоновые кадры SSE не должны выдёргивать его из-под курсора (render
+// применяет State.volume — см. ниже). Программная установка .value события
+// "input" не порождает, поэтому обратного POST и петли не возникает.
+let volumeDragging = false;
+const volumeEl = $<HTMLInputElement>("volume");
+
+volumeEl.addEventListener("pointerdown", () => { volumeDragging = true; });
+volumeEl.addEventListener("pointerup", () => { volumeDragging = false; });
+volumeEl.addEventListener("change", () => { volumeDragging = false; });
+
+volumeEl.addEventListener("input", () => {
+  const v = parseFloat(volumeEl.value);
   audio.volume = v;
   api("/api/player/volume", { volume: v }).catch(() => {});
 });
@@ -647,7 +681,11 @@ audio.addEventListener("playing", () => {
   setFailureError("");
 });
 
-audio.addEventListener("ended", () => { api("/api/player/next").catch(() => {}); });
+// Естественное окончание трека обязано пометить себя reason:"finished":
+// серверский дефолт — в пользу человека (любой next без маркера — скип,
+// routes.go, handleNext), и без него каждый доигранный трек волны учил бы
+// ротор ровно наоборот. Ручные кнопки next/prev reason не шлют — это скип.
+audio.addEventListener("ended", () => { api("/api/player/next", { reason: "finished" }).catch(() => {}); });
 
 audio.addEventListener("error", () => {
   // src убирается намеренно, когда трека больше нет в состоянии

@@ -8,7 +8,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"time"
 
 	"music212/internal/auth"
 	"music212/internal/httpapi"
@@ -40,28 +39,14 @@ func New(store auth.Store) (http.Handler, *stream.Buffer) {
 		Client: newClient,
 	}
 
-	// Отдельный клиент для потоковой загрузки треков — по образцу
-	// internal/ymapi.Client.stream (см. internal/ymapi/client.go). Timeout
-	// здесь намеренно равен нулю: http.Client.Timeout покрывает весь цикл
-	// запроса целиком, включая чтение тела ответа, а трек на медленном
-	// соединении может качаться дольше пяти минут — общий таймаут оборвал
-	// бы его посередине. Ограничена только фаза получения заголовков
-	// (ResponseHeaderTimeout): зависший источник не держит нас вечно.
-	// Верхнюю границу самой загрузки задаёт leaderTimeout прокси
-	// (internal/stream/proxy.go), а не таймаут этого клиента.
-	//
-	// Транспорт клонируется из http.DefaultTransport, а не собирается
-	// голым литералом &http.Transport{...}: у голого литерала нет Proxy —
-	// за обязательным корпоративным HTTP(S)_PROXY вход и метаданные
-	// работали бы (клиент метаданных получает готовый http.DefaultTransport
-	// через ymapi.New), а скачивание каждого трека молча не соединялось
-	// бы, и симптом «всё вроде работает, а музыка не играет» почти
-	// невозможно связать с настройкой прокси. Clone() возвращает
-	// независимую копию — правка её полей ниже не трогает сам
-	// http.DefaultTransport.
-	streamTransport := http.DefaultTransport.(*http.Transport).Clone()
-	streamTransport.ResponseHeaderTimeout = 20 * time.Second
-	streamClient := &http.Client{Transport: streamTransport}
+	// Потоковый клиент не собираем здесь заново — берём его у ymapi-клиента
+	// через HTTPClient(): иначе клонирование http.DefaultTransport с
+	// ResponseHeaderTimeout дублировалось бы в двух пакетах и рано или поздно
+	// разошлось бы по значениям. Токен на этот клиент не влияет (подписанные
+	// ссылки качаются без заголовка Authorization — см. Proxy.download),
+	// поэтому пустая строка в конструкторе безопасна; токен нужен только
+	// запросам метаданных через Get/PostForm/PostJSON.
+	streamClient := ymapi.New("").HTTPClient()
 	a.Proxy = stream.NewProxy(resolverFunc(newClient), buffer, streamClient)
 
 	mux := a.Routes()

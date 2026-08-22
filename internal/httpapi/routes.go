@@ -108,7 +108,9 @@ func goSafe(what string, fn func() error) {
 
 // snapshot собирает текущее состояние для отправки фронтенду.
 func (a *App) snapshot() player.State {
-	tracks, idx, source := a.Queue.Snapshot()
+	// Очередь и текущий трек читаются одним атомарным снимком: раздельные
+	// Snapshot() + Current() дали бы кадр, смешивающий два момента времени.
+	tracks, idx, source, cur := a.Queue.SnapshotWithCurrent()
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
@@ -124,7 +126,7 @@ func (a *App) snapshot() player.State {
 	if st.Status == "" {
 		st.Status = player.StatusIdle
 	}
-	if cur := a.Queue.Current(); cur != nil {
+	if cur != nil {
 		st.Track = cur
 		st.Duration = float64(cur.Duration)
 	}
@@ -323,11 +325,9 @@ func (a *App) handlePlay(w http.ResponseWriter, r *http.Request) {
 // не блокирует запрос — тоже трактуется как скип, тот же безопасный
 // дефолт для любого не-"finished" случая.
 //
-// Фронтенд начнёт присылать reason:"finished" на "ended" отдельной
-// правкой (эта часть цикла — только серверная); до её выкладки каждое
-// естественное окончание трека будет ошибочно учитываться как skip. Это
-// временный побочный эффект выбранного дефолта, а не дефект этой правки —
-// он снимается тем же коммитом, что научит фронтенд слать reason.
+// Фронтенд шлёт reason:"finished" из обработчика "ended" <audio>;
+// ручные кнопки «вперёд»/«назад», MediaSession и клавиши идут без
+// reason и поэтому корректно учитываются как скип.
 func (a *App) handleNext(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Reason string `json:"reason"`
@@ -345,6 +345,11 @@ func (a *App) handleNext(w http.ResponseWriter, r *http.Request) {
 // и handleDislike: дизлайк — это усиленный скип, и весь фидбек уходящего
 // трека (event + play-audio внутри reportFinished) обязан уйти ДО сдвига
 // очереди, иначе cur и позиция будут относиться уже к новому треку.
+//
+// reportFinished зовётся только отсюда — то есть только при движении
+// ВПЕРЁД. handlePrev и handleQueueIndex фидбек уходящего трека не шлют
+// осознанно: возврат назад или клик по треку очереди — не скип и не
+// дослушивание, и учить ротор «не нравится» по такому переходу нельзя.
 func (a *App) advanceToNext(ctx context.Context, event string) {
 	a.reportFinished(event)
 
@@ -375,21 +380,27 @@ func (a *App) advanceToNext(ctx context.Context, event string) {
 	a.prefetchNext()
 	a.setStatus(player.StatusLoading, "")
 	// Сноска ставится ПОСЛЕ setStatus: тот перезаписывает errText целиком,
-	// а предупреждение обязано пережить смену статуса и уйти только со
-	// следующим переходом (его setStatus затрёт его сам).
+	// а предупреждение обязано пережить именно ЭТУ смену статуса. Затрёт
+	// его ближайший следующий setStatus — любой: не только переход, но и
+	// пауза/возобновление (handlePause/handleResume зовут тот же setStatus).
 	if len(skipped) > 0 {
 		a.setWarning(skipWarningText(skipped))
 	}
 }
 
+// handlePrev возвращает очередь на предыдущий трек. skipUnavailable здесь
+// нет осознанно: назад идут по явной воле на конкретный трек; если он
+// недоступен, ошибку покажет <audio> и сетевой откат фронтенда (спека §10
+// применена при движении вперёд). На начале или пустой очереди перехода
+// нет — и статус «загрузка» без трека не ставится.
 func (a *App) handlePrev(w http.ResponseWriter, r *http.Request) {
 	if a.Queue.Prev() {
 		a.resetPosition()
 		a.reportTrackStarted()
+		a.retainBuffer()
+		a.prefetchNext()
+		a.setStatus(player.StatusLoading, "")
 	}
-	a.retainBuffer()
-	a.prefetchNext()
-	a.setStatus(player.StatusLoading, "")
 	writeJSON(w, http.StatusOK, a.snapshot())
 }
 
@@ -466,6 +477,9 @@ func (a *App) reportLikeFeedback(trackID, event string) {
 	}
 	c, err := a.newClient()
 	if err != nil {
+		// Единственная точка, где оценка обрывается до отправки, — обязана
+		// оставить след в логе, как остальной фидбек через goSafe.
+		log.Printf("ротор: %s: %v", event, err)
 		return
 	}
 	a.mu.RLock()
@@ -516,6 +530,11 @@ func (a *App) handleQueueIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.reportTrackStarted()
+	// Прыжок кликом — такая же смена позиции, что и handleNext: под конец
+	// очереди обязаны подкачать следующий батч, иначе волна доиграет
+	// остаток и встанет в idle (несимметрия с advanceToNext, находка
+	// ре-ревью).
+	a.refillWave(r.Context())
 	a.retainBuffer()
 	a.prefetchNext()
 	a.setStatus(player.StatusLoading, "")
@@ -536,6 +555,12 @@ func (a *App) handleResume(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleProgress принимает позицию от фронтенда: воспроизведением владеет он.
+// Битое тело молча трактуется как нулевая позиция и статус playing — тики
+// идут каждые несколько секунд, и ронять запрос из-за одного битого кадра
+// нет смысла: следующий тик принесёт настоящую позицию. По той же причине
+// запоздалый тик от уже сменившегося трека может на один кадр перезаписать
+// позицию нового — это осознанная цена модели «воспроизведением владеет
+// фронтенд», а не упущение.
 func (a *App) handleProgress(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Position float64 `json:"position"`
@@ -680,6 +705,7 @@ func (a *App) refillWave(ctx context.Context) {
 	}
 	c, err := a.newClient()
 	if err != nil {
+		log.Printf("ротор: подкачка батча волны не удалась: %v", err)
 		return
 	}
 	cur := a.Queue.Current()
@@ -688,11 +714,23 @@ func (a *App) refillWave(ctx context.Context) {
 		last = cur.ID
 	}
 	batch, err := c.StationTracks(ctx, ymapi.WaveStationID, last)
-	if err == nil && batch != nil {
+	if err == nil && len(batch.Tracks) == 0 {
+		// Успех с пустой порцией — тот же отказ, только молчаливый:
+		// без этой проверки волна доигрывала остаток очереди и вставала
+		// без единого объяснения (StationTracks никогда не возвращает
+		// (nil, nil) — живой пустой случай именно такой).
+		err = errors.New("ротор вернул пустой батч")
+	}
+	if err == nil {
+		// Пока шёл сетевой запрос, источник мог смениться — дозаливка
+		// атомарна с проверкой (AppendIfSource), чтобы батч волны не
+		// попал в чужую очередь.
+		if !a.Queue.AppendIfSource(batch.Tracks, "wave") {
+			return
+		}
 		a.mu.Lock()
 		a.batchID = batch.BatchID
 		a.mu.Unlock()
-		a.Queue.Append(batch.Tracks)
 		// refillWave срабатывает, когда следующего трека в очереди ещё не
 		// было — prefetchNext на прошлом переходе нечего было качать. После
 		// дозаливки батча он появился: подкачиваем его сразу, иначе первый
@@ -702,7 +740,12 @@ func (a *App) refillWave(ctx context.Context) {
 	}
 	log.Printf("ротор: подкачка батча волны не удалась: %v", err)
 	a.setWarning(refillWaveWarning)
-	a.retryRefillWave(c, last)
+	// Повтору передаём batchID на момент отказа: по нему горутина поймёт,
+	// что волна перезапущена, пока шли паузы (см. retryRefillWave).
+	a.mu.RLock()
+	expectBatchID := a.batchID
+	a.mu.RUnlock()
+	a.retryRefillWave(c, last, expectBatchID)
 }
 
 // retryRefillWave — фоновые повторы подкачки батча после первой неудачи в
@@ -710,25 +753,45 @@ func (a *App) refillWave(ctx context.Context) {
 // бесконечный цикл: по его исчерпании предупреждение остаётся в
 // State.Error до следующего успешного refillWave. Успех дозаливает батч
 // в очередь и снимает именно это предупреждение (clearWarning).
-func (a *App) retryRefillWave(c *ymapi.Client, lastTrackID string) {
+//
+// Перед дозаливкой повтор перепроверяет, что очередь всё ещё та самая
+// волна: пока шли паузы, пользователь мог запустить плейлист (source
+// сменился) или перезапустить волну (batchID сменился). Дозаливать
+// устаревший батч в чужую очередь нельзя — в этом случае выходим молча:
+// новая очередь сама о себе позаботится.
+func (a *App) retryRefillWave(c *ymapi.Client, lastTrackID, expectBatchID string) {
 	goSafe("ротор: повтор подкачки батча волны", func() error {
 		var err error
 		for _, pause := range refillWaveBackoff {
 			<-time.After(pause)
 			var batch *ymapi.WaveBatch
 			batch, err = c.StationTracks(context.Background(), ymapi.WaveStationID, lastTrackID)
-			if err == nil && batch != nil {
-				a.mu.Lock()
-				a.batchID = batch.BatchID
-				a.mu.Unlock()
-				a.Queue.Append(batch.Tracks)
-				a.prefetchNext() // как в refillWave: появившийся следующий трек качаем сразу
-				a.clearWarning(refillWaveWarning)
+			if err == nil && len(batch.Tracks) == 0 {
+				err = errors.New("ротор вернул пустой батч")
+			}
+			if err != nil {
+				continue
+			}
+			// Перезапуск волны виден по сменившемуся batchID, уход в
+			// плейлист — по отказу AppendIfSource: проверка источника и
+			// дозаливка идут под одним захватом мьютекса очереди.
+			a.mu.RLock()
+			restarted := a.batchID != expectBatchID
+			a.mu.RUnlock()
+			if restarted {
 				return nil
 			}
-		}
-		if err == nil {
-			err = errors.New("ротор вернул пустой батч")
+			if !a.Queue.AppendIfSource(batch.Tracks, "wave") {
+				return nil
+			}
+			a.mu.Lock()
+			if a.batchID == expectBatchID {
+				a.batchID = batch.BatchID
+			}
+			a.mu.Unlock()
+			a.prefetchNext() // как в refillWave: появившийся следующий трек качаем сразу
+			a.clearWarning(refillWaveWarning)
+			return nil
 		}
 		return fmt.Errorf("не удалось подкачать батч волны после %d повторов: %w", len(refillWaveBackoff), err)
 	})
@@ -762,10 +825,10 @@ func (a *App) clearWarning(expect string) {
 }
 
 // resetPosition обнуляет накопленную позицию воспроизведения. Обязана
-// звonить в любом месте, где меняется текущий трек (handlePlay, handleNext,
-// handlePrev, находка 4) — иначе следующий вызов reportFinished унаследует
-// позицию уже сыгранного трека и пришлёт её как "сколько проиграно" для
-// трека, который ещё не начинал звучать.
+// звонить в любом месте, где меняется текущий трек (handlePlay, handleNext,
+// handlePrev, handleQueueIndex; находка 4) — иначе следующий вызов
+// reportFinished унаследует позицию уже сыгранного трека и пришлёт её как
+// "сколько проиграно" для трека, который ещё не начинал звучать.
 func (a *App) resetPosition() {
 	a.mu.Lock()
 	a.position = 0

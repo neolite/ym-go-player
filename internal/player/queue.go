@@ -137,3 +137,36 @@ func (q *Queue) Snapshot() ([]Track, int, string) {
 	copy(out, q.tracks)
 	return out, q.index, q.source
 }
+
+// SnapshotWithCurrent — Snapshot и Current под одним захватом мьютекса.
+// Отдельные вызовы Snapshot() + Current() читают очередь в два разных
+// момента: между ними позиция могла сдвинуться, и SSE-кадр смешал бы
+// очередь одного момента с текущим треком другого. Здесь весь снимок
+// атомарен. Контракт копии тот же, что у Snapshot: tracks всегда non-nil.
+func (q *Queue) SnapshotWithCurrent() (tracks []Track, idx int, source string, cur *Track) {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	tracks = make([]Track, len(q.tracks))
+	copy(tracks, q.tracks)
+	if q.index >= 0 && q.index < len(q.tracks) {
+		t := q.tracks[q.index]
+		cur = &t
+	}
+	return tracks, q.index, q.source, cur
+}
+
+// AppendIfSource дозаливает треки, только если источник очереди всё ещё
+// равен ожидаемому — проверка и дозаливка идут под одним захватом
+// мьютекса. Нужен фоновой подкачке батчей ротора (refillWave/retryRefillWave
+// в internal/httpapi/routes.go): пока шёл сетевой запрос и паузы повторов,
+// пользователь мог запустить другой источник, и заливать треки волны в
+// чужую очередь нельзя. false — источник сменился, очередь не тронута.
+func (q *Queue) AppendIfSource(tracks []Track, source string) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.source != source {
+		return false
+	}
+	q.tracks = append(q.tracks, normalizeTracks(tracks)...)
+	return true
+}

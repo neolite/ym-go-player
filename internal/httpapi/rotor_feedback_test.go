@@ -346,3 +346,59 @@ func TestHandleQueueIndexOutOfRangeReturns400(t *testing.T) {
 		t.Fatalf("после отказа текущий трек не должен меняться, Current = %v", got)
 	}
 }
+
+// --- ре-ревью: клик по очереди подкачивает батч, prev на старте не
+// выставляет «загрузку».
+
+// Клик по последнему треку волны — такая же смена позиции, что и next:
+// refillWave обязан подкачать следующий батч, иначе волна доиграет остаток
+// и встанет в idle, хотя приход на ту же позицию через «вперёд» подкачку
+// бы запустил.
+func TestQueueIndexTriggersRefill(t *testing.T) {
+	srv, _, _ := newRotorFakeBackend(t)
+	defer srv.Close()
+
+	app := waveApp(srv, []player.Track{{Available: true, ID: "a"}, {Available: true, ID: "b"}})
+	mux := app.Routes()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/player/queue-index", strings.NewReader(`{"index":1}`))
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	var st player.State
+	if err := json.NewDecoder(rec.Body).Decode(&st); err != nil {
+		t.Fatalf("разбор ответа: %v", err)
+	}
+	if len(st.Queue) != 3 {
+		t.Fatalf("после клика на последний трек волны батч обязан подкачаться, len(Queue) = %d, want 3", len(st.Queue))
+	}
+}
+
+// «Назад» на начале очереди — перехода нет, и статус «загрузка» без смены
+// трека ставить нельзя: фронтенд показал бы вечный спиннер на том же треке.
+func TestPrevAtQueueStartKeepsStatus(t *testing.T) {
+	srv, _, _ := newRotorFakeBackend(t)
+	defer srv.Close()
+
+	app := waveApp(srv, []player.Track{{Available: true, ID: "a"}, {Available: true, ID: "b"}})
+	mux := app.Routes()
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/player/prev", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200", rec.Code)
+	}
+	var st player.State
+	if err := json.NewDecoder(rec.Body).Decode(&st); err != nil {
+		t.Fatalf("разбор ответа: %v", err)
+	}
+	if st.Status == player.StatusLoading {
+		t.Fatal("prev на начале очереди не должен ставить loading без смены трека")
+	}
+	if st.Track == nil || st.Track.ID != "a" {
+		t.Fatalf("текущий трек не должен был смениться, Track = %+v", st.Track)
+	}
+}

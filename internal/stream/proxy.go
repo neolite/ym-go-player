@@ -57,9 +57,20 @@ type Proxy struct {
 }
 
 // NewProxy собирает прокси. hc может быть nil — тогда берётся клиент по умолчанию.
+// В проде сюда всегда приходит потоковый клиент ymapi (Client.HTTPClient);
+// дефолт ниже — для тестов и простых случаев.
 func NewProxy(r Resolver, b *Buffer, hc *http.Client) *Proxy {
 	if hc == nil {
-		hc = &http.Client{Timeout: 5 * time.Minute}
+		// Общего Timeout намеренно нет: он покрывает весь цикл запроса,
+		// включая чтение тела ответа, и оборвал бы долгую загрузку трека
+		// посередине. Верхнюю границу самой загрузки задаёт leaderTimeout —
+		// это страховка от вечного зависания источника, а не ограничение
+		// скорости скачивания. Здесь ограничена только фаза получения
+		// заголовков ответа. Транспорт клонируется из http.DefaultTransport,
+		// чтобы не потерять Proxy (HTTP(S)_PROXY) и пул соединений.
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.ResponseHeaderTimeout = 20 * time.Second
+		hc = &http.Client{Transport: transport}
 	}
 	return &Proxy{
 		resolver: r,

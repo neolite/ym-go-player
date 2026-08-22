@@ -56,10 +56,24 @@ func TestErrorBodyDoesNotLeakToken(t *testing.T) {
 // TestHTTPClientHasNoOverallTimeout проверяет, что клиент, отдаваемый для
 // потоковой загрузки (HTTPClient), не обрывает запрос по общему таймауту:
 // http.Client.Timeout покрывает весь цикл запроса включая чтение тела, а
-// трек может качаться дольше 20 секунд на слабой сети.
+// трек может качаться дольше 20 секунд на слабой сети. Заодно проверяется,
+// что транспорт — клон http.DefaultTransport: у него есть Proxy (обязательный
+// корпоративный HTTP(S)_PROXY не должен молча ломать скачивание) и ограничена
+// фаза получения заголовков ответа (зависший сервер не держит нас вечно).
 func TestHTTPClientHasNoOverallTimeout(t *testing.T) {
 	c := NewWithBase("t", "http://example.invalid")
-	if got := c.HTTPClient().Timeout; got != 0 {
+	hc := c.HTTPClient()
+	if got := hc.Timeout; got != 0 {
 		t.Fatalf("HTTPClient().Timeout = %v, want 0 (no overall deadline for streaming)", got)
+	}
+	tr, ok := hc.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("HTTPClient().Transport = %T, want *http.Transport", hc.Transport)
+	}
+	if tr.ResponseHeaderTimeout <= 0 {
+		t.Fatalf("ResponseHeaderTimeout = %v, want > 0", tr.ResponseHeaderTimeout)
+	}
+	if tr.Proxy == nil {
+		t.Fatal("Proxy = nil, want ProxyFromEnvironment из http.DefaultTransport")
 	}
 }
