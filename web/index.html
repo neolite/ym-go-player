@@ -82,14 +82,32 @@
     #search::placeholder { color:var(--faint); }
     #search:focus { border-color:var(--accent); background:var(--surface); outline:none; }
 
-    #btnTheme {
-      flex:none; width:34px; height:34px;
-      display:inline-flex; align-items:center; justify-content:center;
-      background:var(--surface2); border:none; border-radius:10px;
-      color:var(--dim); transition:color .2s var(--ease), transform .2s var(--ease);
+    /* переключалка тем — «пилюли» с точкой фирменного цвета темы;
+       активная и наведённая светятся этим цветом (неон-приём) */
+    #themeSwitch {
+      flex:none; display:flex; gap:3px; padding:3px;
+      background:var(--surface2); border-radius:999px;
     }
-    #btnTheme svg { width:15px; height:15px; fill:currentColor; }
-    #btnTheme:hover { color:var(--fg); transform:rotate(15deg); }
+    #themeSwitch button {
+      display:inline-flex; align-items:center; gap:5px;
+      background:none; border:1px solid transparent; border-radius:999px;
+      padding:5px 10px; font-size:11px; font-weight:700;
+      letter-spacing:.06em; text-transform:uppercase; color:var(--dim);
+      transition:color .2s var(--ease), border-color .2s var(--ease), box-shadow .25s var(--ease);
+    }
+    #themeSwitch button::before {
+      content:""; width:7px; height:7px; border-radius:50%;
+      background:var(--dot); box-shadow:0 0 6px var(--dot);
+    }
+    #themeSwitch button:hover {
+      color:var(--fg); border-color:var(--dot);
+      box-shadow:0 0 10px color-mix(in srgb, var(--dot) 40%, transparent);
+    }
+    #themeSwitch button.active {
+      color:var(--fg); border-color:var(--dot);
+      box-shadow:0 0 14px color-mix(in srgb, var(--dot) 55%, transparent),
+        inset 0 0 8px color-mix(in srgb, var(--dot) 18%, transparent);
+    }
 
     /* элементы экспериментальных тем — в базовой скрыты:
        #bgArt (размытая обложка, lab), #bigTime (lab), .qcover (lab),
@@ -218,7 +236,7 @@
     #tokenSave:hover { transform:translateY(-1px); filter:brightness(1.06); }
     #authMsg { margin-left:10px; font-size:14px; color:var(--err-fg); }
 
-    /* --- кислотная тема (переключатель #btnTheme) --- */
+    /* --- кислотная тема --- */
     body.acid {
       --bg:#060606; --surface:#101010; --surface2:#181818;
       --fg:#f4fffd; --dim:#9aa39e; --faint:#5c665f;
@@ -235,7 +253,6 @@
     }
     body.acid header { border-bottom:3px solid var(--accent); }
     body.acid .sources { background:none; padding:0; border-radius:0; gap:8px; }
-    body.acid #btnTheme { background:none; }
     body.acid .sources button {
       text-transform:uppercase; font-weight:800; font-size:13px;
       letter-spacing:.08em; border:2px solid transparent; border-radius:0;
@@ -305,9 +322,11 @@
     }
     body.acid #tokenInput { border-radius:0; border-width:2px; }
     body.acid #tokenSave { border-radius:0; text-transform:uppercase; font-weight:900; box-shadow:4px 4px 0 var(--acid2); }
-    body.acid #btnTheme { border:2px solid var(--acid3); border-radius:0; color:var(--acid3); }
+    body.acid #themeSwitch { background:none; border:2px solid var(--fg); border-radius:0; padding:4px; }
+    body.acid #themeSwitch button { border-radius:0; }
+    body.acid #themeSwitch button.active { color:#060606; background:var(--dot); box-shadow:3px 3px 0 var(--acid2); }
 
-    /* --- лаборатория: иммерсивный плеер (третья тема, цикл #btnTheme) ---
+    /* --- лаборатория: иммерсивный плеер ---
        Всегда тёмная: фон — размытая обложка, текст принудительно светлый. */
     body.lab {
       background:#0d0d13;
@@ -333,8 +352,9 @@
     body.lab .sources button.active { color:#fff; }
     body.lab #search { background:#ffffff12; color:#fff; }
     body.lab #search::placeholder { color:#ffffff77; }
-    body.lab #btnTheme { background:#ffffff12; color:#ffffff99; }
-    body.lab #btnTheme:hover { color:#fff; }
+    body.lab #themeSwitch { background:#ffffff12; backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px); }
+    body.lab #themeSwitch button { color:#ffffff99; }
+    body.lab #themeSwitch button.active { color:#fff; }
 
     body.lab #now { align-items:center; gap:44px; margin:2vh 0 4vh; }
     body.lab #cover {
@@ -436,8 +456,10 @@
       text-transform:uppercase; font-weight:700; font-size:12px; letter-spacing:.08em;
     }
     body.blok #search:focus { border-color:var(--accent); background:transparent; }
-    body.blok #btnTheme { background:none; border:2px solid #111; border-radius:0; color:#111; }
-    body.blok #btnTheme:hover { color:var(--accent); border-color:var(--accent); transform:none; }
+    body.blok #themeSwitch { background:none; border:2px solid #111; border-radius:0; padding:4px; }
+    body.blok #themeSwitch button { border-radius:0; color:#111; }
+    body.blok #themeSwitch button::before { border-radius:0; box-shadow:none; }
+    body.blok #themeSwitch button.active { background:#111; color:#e6e1d6; box-shadow:none; }
 
     body.blok #now { flex-wrap:wrap; gap:22px; margin-bottom:26px; }
     body.blok #now::before {
@@ -601,8 +623,8 @@
     }
     body.neon #search::placeholder { color:var(--faint); }
     body.neon #search:focus { border-color:var(--neon-cyan); background:#ffffff14; box-shadow:0 0 22px #5ff5ff38; }
-    body.neon #btnTheme { background:#ffffff0d; border:1.5px solid var(--line); color:var(--dim); border-radius:999px; }
-    body.neon #btnTheme:hover { color:var(--accent); border-color:var(--accent); box-shadow:0 0 18px #e8ff1e40; transform:rotate(15deg); }
+    body.neon #themeSwitch { background:#ffffff0d; border:1.5px solid var(--line); }
+    body.neon #themeSwitch button.active { color:#fff; }
 
     body.neon #now { align-items:center; gap:42px; margin:3vh 0 5vh; }
     body.neon #cover {
@@ -705,6 +727,19 @@
       body.neon::after { font-size:34vw; right:-.4em; }
     }
 
+    /* --- широкое окно (нативный клиент / полный экран) ---
+       Лейаут не меняется — та же колонка, но шире и с крупнее обложкой,
+       чтобы в webview на весь экран не оставалось пустых полей. Темы lab
+       и blok имеют собственную авторскую ширину (body.* #app ниже) и эту
+       ступень не наследуют. */
+    @media (min-width:1100px) {
+      #app { max-width:1060px; }
+      #cover { width:248px; height:248px; }
+      #title { font-size:clamp(26px,3vw,36px); }
+      body.neon #app { max-width:1180px; }
+      body.neon #cover { width:min(360px,32vw); }
+    }
+
     /* --- мобильный --- */
     @media (max-width:560px) {
       #app { padding:14px 14px 48px; }
@@ -751,9 +786,13 @@
         <button id="btnLists">Плейлисты</button>
       </nav>
       <input id="search" placeholder="Поиск" aria-label="Поиск">
-      <button id="btnTheme" title="Переключить тему" aria-label="Переключить тему">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l2.3 6.7L21 11l-6.7 2.3L12 20l-2.3-6.7L3 11l6.7-2.3z"/></svg>
-      </button>
+      <div id="themeSwitch" role="group" aria-label="Тема оформления">
+        <button data-theme="" style="--dot:#7c5cf0">SF</button>
+        <button data-theme="acid" style="--dot:#e8ff00">acid</button>
+        <button data-theme="lab" style="--dot:#a78bfa">lab</button>
+        <button data-theme="blok" style="--dot:#d40000">blok</button>
+        <button data-theme="neon" style="--dot:#5ff5ff">neon</button>
+      </div>
     </header>
     <div id="errorBar" class="hidden" role="alert"></div>
     <main>

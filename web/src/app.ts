@@ -146,15 +146,14 @@ async function api(path: string, body?: unknown): Promise<any> {
 
 // --- тема ---
 //
-// Пять тем, переключаемых циклом: базовая SF → кислотная → лаборатория
-// (иммерсивная) → blok (пост-советский брутализм) → neon (глубокий синий,
-// люминесцентные глифы). Это чисто визуальные
+// Пять тем, выбираемых переключалкой #themeSwitch: базовая SF, кислотная,
+// лаборатория (иммерсивная), blok (пост-советский брутализм), neon
+// (глубокий синий, люминесцентные глифы). Это чисто визуальные
 // слои (класс на <body>), логику плеера не трогают. Выбор хранится в
 // localStorage и применяется до первого кадра SSE, чтобы интерфейс не
 // мигал другой темой при загрузке.
 
 const THEME_KEY = "music212.theme";
-const THEMES = ["", "acid", "lab", "blok", "neon"];
 let currentTheme = "";
 
 function applyTheme(theme: string, persist = true): void {
@@ -163,6 +162,9 @@ function applyTheme(theme: string, persist = true): void {
   document.body.classList.toggle("lab", theme === "lab");
   document.body.classList.toggle("blok", theme === "blok");
   document.body.classList.toggle("neon", theme === "neon");
+  document.querySelectorAll<HTMLButtonElement>("#themeSwitch button").forEach((b) => {
+    b.classList.toggle("active", (b.dataset.theme ?? "") === theme);
+  });
   if (!persist) return;
   try { localStorage.setItem(THEME_KEY, theme); } catch { /* приватный режим — тема просто не запомнится */ }
 }
@@ -175,9 +177,8 @@ try {
   applyTheme(hashTheme ? hashTheme[1] : (localStorage.getItem(THEME_KEY) ?? ""), !hashTheme);
 } catch { /* нет localStorage — остаётся базовая тема */ }
 
-$("btnTheme").addEventListener("click", () => {
-  const next = THEMES[(THEMES.indexOf(currentTheme) + 1) % THEMES.length];
-  applyTheme(next);
+document.querySelectorAll<HTMLButtonElement>("#themeSwitch button").forEach((btn) => {
+  btn.addEventListener("click", () => { applyTheme(btn.dataset.theme ?? ""); });
 });
 
 // --- авторизация ---
