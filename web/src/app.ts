@@ -4,11 +4,13 @@
 // перетаскивания ползунка, счётчик неудачных попыток воспроизведения,
 // пауза переподключения.
 
+import { BAND_FREQS, initEqualizer, getGains, setBandGain, resetGains } from "./equalizer";
+
 type Status = "idle" | "loading" | "playing" | "paused" | "error";
 
 interface Track {
   id: string; title: string; artists: string[];
-  album: string; coverUrl: string; duration: number; available: boolean;
+  album: string; coverUrl: string; duration: number; available: boolean; liked: boolean;
 }
 
 interface State {
@@ -24,6 +26,7 @@ const listsEl = $<HTMLUListElement>("lists");
 const errorBar = $<HTMLDivElement>("errorBar");
 const bgArtEl = $<HTMLDivElement>("bgArt");
 let currentTrackId = "";
+let lastLiked = false;
 
 // Позицию внутри трека помнит сервер (State.position), но <audio> после
 // перезагрузки страницы всегда стартует с нуля. Восстанавливаем её один
@@ -132,11 +135,11 @@ async function errorText(res: Response): Promise<string> {
   return text;
 }
 
-async function api(path: string, body?: unknown): Promise<any> {
+async function api(path: string, body?: unknown, method = "POST"): Promise<any> {
   const res = await fetch(path, body === undefined
-    ? { method: "POST" }
+    ? { method }
     : {
-      method: "POST",
+      method,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
@@ -221,6 +224,7 @@ function extractToken(raw: string): string {
 async function checkAuth(): Promise<boolean> {
   const st = await (await fetch("/api/auth/status")).json();
   if (st.authorized) {
+    stopDevicePoll();
     $("auth").classList.add("hidden");
     $("app").classList.remove("hidden");
     // Сервер сообщает о неактивном Плюсе в st.message (stateFrom в
@@ -238,7 +242,71 @@ async function checkAuth(): Promise<boolean> {
   return false;
 }
 
+let devicePollTimer: number | undefined;
+
+function stopDevicePoll(): void {
+  if (devicePollTimer !== undefined) {
+    window.clearInterval(devicePollTimer);
+    devicePollTimer = undefined;
+  }
+}
+
+$("btnGetDeviceCode")?.addEventListener("click", async () => {
+  stopDevicePoll();
+  $("authMsg").textContent = "";
+  $("deviceStatusMsg").textContent = "Запрос кода...";
+  $("deviceCodeBox").classList.remove("hidden");
+
+  try {
+    const res = await fetch("/api/auth/device/code", { method: "POST" });
+    if (!res.ok) {
+      const err = await errorText(res);
+      $("authMsg").textContent = err || "Ошибка получения кода";
+      $("deviceCodeBox").classList.add("hidden");
+      return;
+    }
+    const data = await res.json();
+    $("deviceUserCode").textContent = data.user_code || "—";
+    const authUrl = data.verification_url || "https://oauth.yandex.ru/activate";
+    ($("deviceAuthUrl") as HTMLAnchorElement).href = authUrl;
+    $("deviceStatusMsg").textContent = "Ожидание подтверждения кода на странице Яндекса...";
+
+    const pollInterval = Math.max(3, data.interval || 5) * 1000;
+    const deviceCode = data.device_code;
+
+    devicePollTimer = window.setInterval(async () => {
+      try {
+        const pollRes = await fetch("/api/auth/device/poll", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ deviceCode }),
+        });
+        const pollData = await pollRes.json();
+
+        if (pollRes.ok && pollData.authorized) {
+          stopDevicePoll();
+          $("deviceStatusMsg").textContent = "Успешно!";
+          await checkAuth();
+          connect();
+        } else if (pollRes.status === 202 || pollData.pending) {
+          // Всё ещё ожидаем действия пользователя
+        } else {
+          stopDevicePoll();
+          $("authMsg").textContent = pollData.message || "Ошибка авторизации по коду";
+          $("deviceStatusMsg").textContent = "Авторизация отменена или истёк срок действия кода";
+        }
+      } catch {
+        // Сетевой сбой — пропускаем итерацию поллинга
+      }
+    }, pollInterval);
+  } catch (e: any) {
+    $("authMsg").textContent = e.message || "Сетевая ошибка";
+    $("deviceCodeBox").classList.add("hidden");
+  }
+});
+
 $("tokenSave").addEventListener("click", async () => {
+  stopDevicePoll();
   const token = extractToken(($("tokenInput") as HTMLInputElement).value);
   const res = await fetch("/api/auth/token", {
     method: "POST",
@@ -335,6 +403,20 @@ function render(st: State): void {
   // что сейчас играет: «волна» или «нравится».
   $("btnWave").classList.toggle("active", st.source === "wave");
   $("btnLikes").classList.toggle("active", st.source === "likes");
+
+  // Статус лайка текущего трека: класс liked переключаем всегда (дешёво и
+  // идемпотентно), а анимацию pop — только на фактической смене значения,
+  // иначе она переигрывалась бы на каждом кадре SSE (несколько раз в
+  // секунду во время воспроизведения).
+  const liked = t?.liked ?? false;
+  const btnLike = $<HTMLButtonElement>("btnLike");
+  btnLike.classList.toggle("liked", liked);
+  if (liked !== lastLiked) {
+    btnLike.classList.remove("pop");
+    void btnLike.offsetWidth; // форсируем reflow, чтобы повторный класс снова запустил анимацию
+    btnLike.classList.add("pop");
+  }
+  lastLiked = liked;
 
   // st.error показываем независимо от того, есть трек или нет — ошибка
   // источника (например, отсутствие Плюса) не обязана ждать пустого трека.
@@ -561,6 +643,82 @@ volumeEl.addEventListener("input", () => {
   api("/api/player/volume", { volume: v }).catch(() => {});
 });
 
+// --- эквалайзер ---
+//
+// Панель строится один раз, при первом открытии (buildEqPanel идемпотентна
+// через eqBuilt) — граф Web Audio (initEqualizer) заводится там же, тоже
+// лениво: см. web/src/equalizer.ts.
+
+const eqPanel = $<HTMLDivElement>("eqPanel");
+const btnEq = $<HTMLButtonElement>("btnEq");
+let eqBuilt = false;
+
+function fmtDb(db: number): string {
+  return (db > 0 ? "+" : "") + db + " дБ";
+}
+
+function fmtFreq(freq: number): string {
+  return freq >= 1000 ? `${freq / 1000} кГц` : `${freq} Гц`;
+}
+
+function buildEqPanel(): void {
+  if (eqBuilt) return;
+  eqBuilt = true;
+  const gains = getGains();
+  const bands = document.createElement("div");
+  bands.className = "eqBands";
+  BAND_FREQS.forEach((freq, i) => {
+    const col = document.createElement("div");
+    col.className = "eqBand";
+    const val = document.createElement("span");
+    val.className = "eqVal";
+    val.textContent = fmtDb(gains[i]);
+    const sliderWrap = document.createElement("div");
+    sliderWrap.className = "eqSliderWrap";
+    const slider = document.createElement("input");
+    slider.type = "range";
+    slider.className = "eqSlider";
+    slider.min = "-12";
+    slider.max = "12";
+    slider.step = "1";
+    slider.value = String(gains[i]);
+    const label = document.createElement("span");
+    label.className = "eqFreq";
+    label.textContent = fmtFreq(freq);
+    slider.setAttribute("aria-label", label.textContent);
+    slider.addEventListener("input", () => {
+      const db = parseFloat(slider.value);
+      setBandGain(i, db);
+      val.textContent = fmtDb(db);
+    });
+    sliderWrap.appendChild(slider);
+    col.append(val, sliderWrap, label);
+    bands.appendChild(col);
+  });
+  eqPanel.appendChild(bands);
+
+  const reset = document.createElement("button");
+  reset.id = "btnEqReset";
+  reset.textContent = "Сброс";
+  reset.addEventListener("click", () => {
+    resetGains();
+    eqPanel.querySelectorAll<HTMLInputElement>(".eqSlider").forEach((s) => { s.value = "0"; });
+    eqPanel.querySelectorAll<HTMLSpanElement>(".eqVal").forEach((v) => { v.textContent = fmtDb(0); });
+  });
+  eqPanel.appendChild(reset);
+}
+
+btnEq.addEventListener("click", () => {
+  const opening = eqPanel.classList.contains("hidden");
+  if (opening) {
+    initEqualizer(audio);
+    buildEqPanel();
+  }
+  eqPanel.classList.toggle("hidden", !opening);
+  btnEq.classList.toggle("active", opening);
+  btnEq.setAttribute("aria-expanded", String(opening));
+});
+
 // Горячие клавиши: пробел — play/pause, стрелки — треки. Не срабатывают
 // из полей ввода, чтобы пробел в поиске не ставил музыку на паузу.
 document.addEventListener("keydown", (e) => {
@@ -580,7 +738,8 @@ document.addEventListener("keydown", (e) => {
 $("btnLike").addEventListener("click", () => {
   const t = lastState?.track;
   if (!t) return;
-  api(`/api/tracks/${t.id}/like`).catch(() => {});
+  const method = t.liked ? "DELETE" : "POST";
+  api(`/api/tracks/${t.id}/like`, undefined, method).catch(() => {});
 });
 $("btnDislike").addEventListener("click", () => {
   const t = lastState?.track;
@@ -630,11 +789,29 @@ progressEl.addEventListener("input", () => {
   }
 });
 
-// Полосу двигаем на timeupdate — он приходит по несколько раз в секунду,
-// так что глаз не видит скачков. Позицию на сервер шлём отдельно и реже:
-// серверу чаще не нужно.
+// Полосу движет rAF-цикл на время воспроизведения: currentTime читается
+// живым значением каждый кадр, и полоса ползёт непрерывно, а не скачками
+// на 4 Гц от timeupdate. Сам timeupdate остаётся как запасной путь для
+// перемотки на паузе — там rAF не крутится.
+// Позицию на сервер шлём отдельно и реже: серверу чаще не нужно.
+let progressRaf = 0;
+function tickProgress(): void {
+  progressRaf = 0;
+  if (!progressDragging && audio.duration) {
+    setProgress((audio.currentTime / audio.duration) * 100);
+    $("timeCur").textContent = fmtTime(audio.currentTime);
+    $("bigTime").textContent = fmtTime(audio.currentTime);
+  }
+  if (!audio.paused && !audio.ended) {
+    progressRaf = requestAnimationFrame(tickProgress);
+  }
+}
+function startProgressLoop(): void {
+  if (progressRaf === 0) progressRaf = requestAnimationFrame(tickProgress);
+}
+audio.addEventListener("playing", startProgressLoop);
 audio.addEventListener("timeupdate", () => {
-  if (progressDragging) return;
+  if (progressDragging || progressRaf !== 0) return; // на ходу полосу ведёт rAF
   if (audio.duration) {
     setProgress((audio.currentTime / audio.duration) * 100);
     $("timeCur").textContent = fmtTime(audio.currentTime);
@@ -644,7 +821,10 @@ audio.addEventListener("timeupdate", () => {
 
 setInterval(() => {
   if (!audio.paused && audio.currentTime > 0) {
-    api("/api/player/progress", { position: audio.currentTime }).catch(() => {});
+    // trackId — сервер игнорирует тик, если он больше не относится к
+    // текущему треку очереди (гонка с ручным переключением, routes.go
+    // handleProgress).
+    api("/api/player/progress", { position: audio.currentTime, trackId: currentTrackId }).catch(() => {});
     saveResumeContext();
   }
 }, 5000);

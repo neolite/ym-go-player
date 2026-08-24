@@ -178,6 +178,10 @@
     #btnPlay.playing .icon-play { display:none; }
     #btnLike:hover { color:#ec4899; background:var(--line-strong); transform:translateY(-1px); }
     #btnDislike:hover { color:var(--accent-text); background:var(--line-strong); transform:translateY(-1px); }
+    .tbtn.active { background:var(--accent); color:var(--on-accent); }
+    #btnLike.liked { color:#ec4899; background:#ec489926; }
+    @keyframes likePop { 0% { transform:scale(1); } 35% { transform:scale(1.35); } 100% { transform:scale(1); } }
+    #btnLike.pop svg { animation:likePop .38s var(--ease); }
     #volumeWrap { display:flex; align-items:center; gap:8px; margin-left:auto; color:var(--faint); }
     #volumeWrap svg { width:17px; height:17px; fill:currentColor; }
     #volume { width:104px; height:20px; cursor:pointer; }
@@ -189,6 +193,55 @@
     #volume:hover::-webkit-slider-thumb { background:var(--fg); }
     #volume::-moz-range-track { height:4px; border-radius:2px; background:var(--line-strong); }
     #volume::-moz-range-thumb { width:12px; height:12px; border:none; border-radius:50%; background:var(--dim); }
+
+    /* --- эквалайзер ---
+       Панель на всех темах выглядит одинаково: 5 полос — не повод рисовать
+       по авторскому варианту под каждую из пяти тем. Вертикальные
+       фейдеры — как на железном граф-эквалайзере: дБ сверху, частота
+       снизу.
+       -webkit-appearance:slider-vertical здесь не годится: Blink (и
+       обычный Chrome, и WKWebView нативного клиента на новых macOS)
+       больше не рисует им вертикальный трек — по факту слайдер остаётся
+       горизонтальным (проверено живым прогоном), несмотря на то, что
+       свойство исторически считалось «родным» для WebKit/Blink. Вместо
+       этого — надёжный кросс-браузерный приём: обычный горизонтальный
+       range повёрнут transform:rotate(-90deg) внутри контейнера с
+       вертикальными размерами; направление драга при этом не ломается —
+       браузер сам транслирует координаты указателя в систему отсчёта
+       повёрнутого элемента. -12..+12 идут слева направо на исходном
+       горизонтальном инпуте, поворот на -90deg переносит правый край
+       (max) наверх, левый (min) — вниз, как и требуется. */
+    #eqPanel {
+      display:flex; flex-direction:column; align-items:center; gap:16px;
+      margin:14px 0 0; padding:18px;
+      background:var(--surface2); border-radius:16px;
+    }
+    .eqBands { display:flex; align-items:flex-end; gap:26px; }
+    .eqBand { display:flex; flex-direction:column; align-items:center; gap:8px; }
+    .eqFreq, .eqVal {
+      font-size:12px; color:var(--faint); font-variant-numeric:tabular-nums;
+      white-space:nowrap;
+    }
+    .eqSliderWrap { width:22px; height:130px; display:flex; align-items:center; justify-content:center; }
+    .eqSlider {
+      width:130px; height:22px;
+      transform:rotate(-90deg);
+      cursor:pointer;
+    }
+    .eqSlider::-webkit-slider-runnable-track { width:130px; height:4px; border-radius:2px; background:var(--line-strong); }
+    .eqSlider::-webkit-slider-thumb {
+      -webkit-appearance:none; width:18px; height:10px; margin-top:-3px;
+      border-radius:4px; background:var(--accent); transition:background .18s var(--ease);
+    }
+    .eqSlider::-moz-range-track { width:130px; height:4px; border-radius:2px; background:var(--line-strong); }
+    .eqSlider::-moz-range-thumb { width:18px; height:10px; border:none; border-radius:4px; background:var(--accent); }
+    #btnEqReset {
+      padding:6px 14px;
+      background:none; border:1px solid var(--line-strong); border-radius:999px;
+      font-size:12.5px; font-weight:600; color:var(--dim);
+      transition:color .2s var(--ease), border-color .2s var(--ease);
+    }
+    #btnEqReset:hover { color:var(--fg); border-color:var(--fg); }
 
     /* --- очередь и плейлисты --- */
     ul { list-style:none; padding:0; margin:0; }
@@ -771,11 +824,24 @@
     </svg>
   </div>
   <div id="auth" class="hidden">
-    <h2>Нужен токен</h2>
-    <p>Откройте <a id="authLink" target="_blank" rel="noopener">страницу входа Яндекса</a>,
-       войдите и скопируйте значение <code>access_token</code> из адресной строки.</p>
-    <input id="tokenInput" placeholder="Вставьте токен сюда" autocomplete="off" aria-label="Токен">
-    <p><button id="tokenSave">Сохранить</button> <span id="authMsg" role="alert"></span></p>
+    <h2>Авторизация</h2>
+    <div id="deviceAuthSection" style="margin-bottom:20px;">
+      <p style="margin-bottom:12px;">Войдите, подтвердив код на странице Яндекса:</p>
+      <button id="btnGetDeviceCode" style="padding:10px 20px; border:none; border-radius:999px; background:var(--grad); color:var(--on-accent); font-weight:600; cursor:pointer;">Получить код для входа</button>
+      <div id="deviceCodeBox" class="hidden" style="margin-top:16px; padding:16px; background:var(--surface2); border-radius:14px; text-align:center;">
+        <div style="font-size:13px; color:var(--dim);">Код для подтверждения:</div>
+        <div id="deviceUserCode" style="font-size:32px; font-weight:800; font-family:ui-monospace, monospace; letter-spacing:3px; margin:8px 0; color:var(--accent-text);">—</div>
+        <div style="margin-bottom:12px;"><a id="deviceAuthUrl" target="_blank" rel="noopener" style="font-weight:600;">Открыть страницу ввода кода</a></div>
+        <div id="deviceStatusMsg" style="font-size:13px; color:var(--dim);">Ожидание подтверждения...</div>
+      </div>
+    </div>
+    <details style="margin-top:16px; font-size:14px; color:var(--dim);">
+      <summary style="cursor:pointer; font-weight:500;">Ввести токен вручную</summary>
+      <p style="margin:12px 0 10px; font-size:13px;">Откройте <a id="authLink" target="_blank" rel="noopener">страницу входа Яндекса</a>, войдите и скопируйте значение <code>access_token</code> из адресной строки.</p>
+      <input id="tokenInput" placeholder="Вставьте токен сюда" autocomplete="off" aria-label="Токен" style="margin-bottom:10px;">
+      <p style="margin:0;"><button id="tokenSave">Сохранить</button></p>
+    </details>
+    <div id="authMsg" role="alert" style="margin-top:12px; font-size:14px; color:var(--err-fg);"></div>
   </div>
 
   <div id="app" class="hidden">
@@ -824,11 +890,19 @@
             <button class="tbtn" id="btnLike" aria-label="Нравится">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
             </button>
+            <button class="tbtn" id="btnEq" aria-label="Эквалайзер" aria-expanded="false">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="3" y="10" width="3" height="11" rx="1.5"/><circle cx="4.5" cy="7" r="2.5"/>
+                <rect x="10.5" y="14" width="3" height="7" rx="1.5"/><circle cx="12" cy="11" r="2.5"/>
+                <rect x="18" y="6" width="3" height="15" rx="1.5"/><circle cx="19.5" cy="3" r="2.5"/>
+              </svg>
+            </button>
             <div id="volumeWrap">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9v6h4l5 4.5v-15L7 9H3zm13.6 3a3.6 3.6 0 0 0-2.1-3.3v6.5a3.6 3.6 0 0 0 2.1-3.2zm-2.1-8v2.1a6 6 0 0 1 0 11.8v2.1a8 8 0 0 0 0-16z"/></svg>
               <input id="volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Громкость">
             </div>
           </div>
+          <div id="eqPanel" class="hidden" aria-label="Эквалайзер"></div>
         </div>
       </section>
       <ul id="list"></ul>

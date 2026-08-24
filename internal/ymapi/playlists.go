@@ -64,22 +64,9 @@ func (c *Client) PlaylistTracks(ctx context.Context, uid int64, kind int) ([]pla
 // Эндпоинт отдаёт только идентификаторы, поэтому метаданные добираются
 // вторым запросом через /tracks.
 func (c *Client) LikedTracks(ctx context.Context, uid int64) ([]player.Track, error) {
-	var res struct {
-		Library struct {
-			Tracks []struct {
-				ID any `json:"id"`
-			} `json:"tracks"`
-		} `json:"library"`
-	}
-	path := "/users/" + strconv.FormatInt(uid, 10) + "/likes/tracks"
-	if err := c.Get(ctx, path, nil, &res); err != nil {
+	ids, err := c.LikedTrackIDs(ctx, uid)
+	if err != nil {
 		return nil, err
-	}
-	ids := make([]string, 0, len(res.Library.Tracks))
-	for _, t := range res.Library.Tracks {
-		if id := idString(t.ID); id != "" {
-			ids = append(ids, id)
-		}
 	}
 	return c.Tracks(ctx, ids)
 }

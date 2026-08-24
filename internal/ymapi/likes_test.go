@@ -47,6 +47,28 @@ func TestLikeAndUnlikeTrack(t *testing.T) {
 	}
 }
 
+// LikedTrackIDs отдаёт только идентификаторы, без похода за метаданными —
+// нужна для кэша статуса «лайкнуто» на бэкенде, которому названия/обложки не
+// требуются, только сверка ID при рендере текущего трека.
+func TestLikedTrackIDs(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/users/555/likes/tracks" {
+			t.Errorf("path = %q, want /users/555/likes/tracks", r.URL.Path)
+		}
+		w.Write([]byte(likesFixture))
+	}))
+	defer srv.Close()
+
+	got, err := NewWithBase("t", srv.URL).LikedTrackIDs(context.Background(), 555)
+	if err != nil {
+		t.Fatalf("LikedTrackIDs: %v", err)
+	}
+	want := []string{"42", "43"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("ID = %v, want %v", got, want)
+	}
+}
+
 // Лайк и дизлайк обязаны нести totalPlayedSeconds — ротору важно, на какой
 // секунде трек оценили (в отличие от trackStarted, где поля быть не должно).
 func TestRotorFeedbackLikeCarriesPlayedSeconds(t *testing.T) {

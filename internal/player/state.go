@@ -22,6 +22,7 @@ type Track struct {
 	CoverURL  string   `json:"coverUrl"`
 	Duration  int      `json:"duration"`
 	Available bool     `json:"available"`
+	Liked     bool     `json:"liked"`
 }
 
 // State — единственный источник правды о воспроизведении.

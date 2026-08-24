@@ -26,12 +26,15 @@ type App struct {
 	Proxy  *stream.Proxy
 	Client func() (*ymapi.Client, error)
 
-	mu       sync.RWMutex
-	status   player.Status
-	position float64
-	volume   float64
-	errText  string
-	batchID  string
+	mu           sync.RWMutex
+	status       player.Status
+	position     float64
+	volume       float64
+	errText      string
+	batchID      string
+	likedIDs     map[string]bool
+	likedLoaded  bool
+	likedLoading bool
 }
 
 // Routes собирает роутер демона.
@@ -127,6 +130,7 @@ func (a *App) snapshot() player.State {
 		st.Status = player.StatusIdle
 	}
 	if cur != nil {
+		cur.Liked = a.likedIDs[cur.ID]
 		st.Track = cur
 		st.Duration = float64(cur.Duration)
 	}
@@ -134,6 +138,76 @@ func (a *App) snapshot() player.State {
 }
 
 func (a *App) publish() { a.Hub.Broadcast(a.snapshot()) }
+
+// ensureLikedLoaded лениво подтягивает набор лайкнутых ID с бэкенда, если
+// его ещё не грузили и статус аккаунта уже проверен. Дёргается из
+// handleEvents (кто-то смотрит на состояние — значит, кто-то смотрит на
+// сердечко), а не изнутри snapshot(): snapshot() держит a.mu.RLock() на всё
+// время работы и не должна пытаться захватить a.mu.Lock() для флагов.
+//
+// Блокировка снимается перед a.publish(): publish -> snapshot берёт
+// a.mu.RLock(), и удержание Lock() на это время дало бы дедлок.
+func (a *App) ensureLikedLoaded() {
+	a.mu.Lock()
+	if a.likedLoaded || a.likedLoading || a.Auth == nil {
+		a.mu.Unlock()
+		return
+	}
+	a.likedLoading = true
+	a.mu.Unlock()
+
+	goSafe("загрузка лайков", func() error {
+		uid := a.Auth.UID()
+		if uid == 0 {
+			a.mu.Lock()
+			a.likedLoading = false
+			a.mu.Unlock()
+			return nil // статус аккаунта ещё не пришёл — попробуем на следующем подключении
+		}
+		c, err := a.newClient()
+		if err != nil {
+			a.mu.Lock()
+			a.likedLoading = false
+			a.mu.Unlock()
+			return err
+		}
+		ids, err := c.LikedTrackIDs(context.Background(), uid)
+		if err != nil {
+			a.mu.Lock()
+			a.likedLoading = false
+			a.mu.Unlock()
+			return err
+		}
+		set := make(map[string]bool, len(ids))
+		for _, id := range ids {
+			set[id] = true
+		}
+		a.mu.Lock()
+		a.likedIDs = set
+		a.likedLoaded = true
+		a.likedLoading = false
+		a.mu.Unlock()
+		a.publish()
+		return nil
+	})
+}
+
+// setLikedCache обновляет статус одного трека в кэше сразу по ответу
+// библиотеки — ждать следующей фоновой перезагрузки ensureLikedLoaded не
+// нужно, иначе сердечко не отразит только что нажатый лайк.
+func (a *App) setLikedCache(trackID string, liked bool) {
+	a.mu.Lock()
+	if a.likedIDs == nil {
+		a.likedIDs = make(map[string]bool)
+	}
+	if liked {
+		a.likedIDs[trackID] = true
+	} else {
+		delete(a.likedIDs, trackID)
+	}
+	a.likedLoaded = true
+	a.mu.Unlock()
+}
 
 func (a *App) setStatus(s player.Status, errText string) {
 	a.mu.Lock()
@@ -143,6 +217,7 @@ func (a *App) setStatus(s player.Status, errText string) {
 }
 
 func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
+	a.ensureLikedLoaded()
 	a.Hub.HandleSSE(w, r, a.snapshot())
 }
 
@@ -439,6 +514,8 @@ func (a *App) setTrackLike(w http.ResponseWriter, r *http.Request, like bool) {
 	if like {
 		a.reportLikeFeedback(id, ymapi.EventLike)
 	}
+	a.setLikedCache(id, like)
+	a.publish()
 	writeJSON(w, http.StatusOK, a.snapshot())
 }
 
@@ -555,17 +632,25 @@ func (a *App) handleResume(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleProgress принимает позицию от фронтенда: воспроизведением владеет он.
-// Битое тело молча трактуется как нулевая позиция и статус playing — тики
-// идут каждые несколько секунд, и ронять запрос из-за одного битого кадра
-// нет смысла: следующий тик принесёт настоящую позицию. По той же причине
-// запоздалый тик от уже сменившегося трека может на один кадр перезаписать
-// позицию нового — это осознанная цена модели «воспроизведением владеет
-// фронтенд», а не упущение.
+// trackId в теле — трек, для которого клиент читал audio.currentTime; тик
+// применяется, только если это трек, который всё ещё Queue.Current(). Тики
+// идут раз в несколько секунд (web/src/app.ts), и ручное переключение
+// (queue-index/next/prev) может обогнать в сети уже отправленный тик
+// прошлого трека — без этой проверки он приходил бы ПОСЛЕ resetPosition и
+// переписывал свежую позицию нового трека чужим значением. Битое или
+// рассинхронизированное тело (в том числе отсутствие trackId) молча
+// отбрасывается целиком: следующий тик принесёт настоящую позицию, ронять
+// запрос из-за одного кадра нет смысла.
 func (a *App) handleProgress(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Position float64 `json:"position"`
+		TrackID  string  `json:"trackId"`
 	}
 	json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body)
+	if cur := a.Queue.Current(); cur == nil || cur.ID != body.TrackID {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	a.mu.Lock()
 	a.position = body.Position
 	a.status = player.StatusPlaying

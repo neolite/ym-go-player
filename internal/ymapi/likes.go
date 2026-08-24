@@ -27,3 +27,26 @@ func (c *Client) setTrackLike(ctx context.Context, uid int64, trackID, op string
 	path := "/users/" + strconv.FormatInt(uid, 10) + "/likes/tracks/" + op
 	return c.PostForm(ctx, path, form, nil)
 }
+
+// LikedTrackIDs отдаёт идентификаторы лайкнутых треков без похода за
+// метаданными (в отличие от LikedTracks, которая резолвит их через /tracks).
+func (c *Client) LikedTrackIDs(ctx context.Context, uid int64) ([]string, error) {
+	var res struct {
+		Library struct {
+			Tracks []struct {
+				ID any `json:"id"`
+			} `json:"tracks"`
+		} `json:"library"`
+	}
+	path := "/users/" + strconv.FormatInt(uid, 10) + "/likes/tracks"
+	if err := c.Get(ctx, path, nil, &res); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(res.Library.Tracks))
+	for _, t := range res.Library.Tracks {
+		if id := idString(t.ID); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
