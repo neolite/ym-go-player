@@ -48,6 +48,8 @@ func (a *App) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/playlists", a.handlePlaylists)
 	mux.HandleFunc("GET /api/playlists/{kind}", a.handlePlaylistTracks)
 	mux.HandleFunc("GET /api/likes", a.handleLikes)
+	mux.HandleFunc("GET /api/artists/{artistId}/tracks", a.handleArtistTracks)
+	mux.HandleFunc("GET /api/albums/{albumId}/tracks", a.handleAlbumTracks)
 	mux.HandleFunc("POST /api/play", a.handlePlay)
 	mux.HandleFunc("POST /api/player/next", a.handleNext)
 	mux.HandleFunc("POST /api/player/prev", a.handlePrev)
@@ -288,6 +290,35 @@ func (a *App) handleLikes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tracks, err := c.LikedTracks(r.Context(), uid)
+	if err != nil {
+		a.apiError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, tracks)
+}
+
+// handleArtistTracks отдаёт треки артиста для карточки «клик по имени».
+// Публичный каталог — requireUID не нужен, в отличие от handleLikes.
+func (a *App) handleArtistTracks(w http.ResponseWriter, r *http.Request) {
+	c, err := a.client(w)
+	if err != nil {
+		return
+	}
+	tracks, err := c.ArtistTracks(r.Context(), r.PathValue("artistId"))
+	if err != nil {
+		a.apiError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, tracks)
+}
+
+// handleAlbumTracks — то же для альбома.
+func (a *App) handleAlbumTracks(w http.ResponseWriter, r *http.Request) {
+	c, err := a.client(w)
+	if err != nil {
+		return
+	}
+	tracks, err := c.AlbumTracks(r.Context(), r.PathValue("albumId"))
 	if err != nil {
 		a.apiError(w, err)
 		return
