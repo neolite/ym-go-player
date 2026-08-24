@@ -9,8 +9,8 @@ import { BAND_FREQS, initEqualizer, getGains, setBandGain, resetGains } from "./
 type Status = "idle" | "loading" | "playing" | "paused" | "error";
 
 interface Track {
-  id: string; title: string; artists: string[];
-  album: string; coverUrl: string; duration: number; available: boolean; liked: boolean;
+  id: string; title: string; artists: string[]; artistIds: string[];
+  album: string; albumId: string; coverUrl: string; duration: number; available: boolean; liked: boolean;
 }
 
 interface State {
@@ -375,6 +375,20 @@ function onFirstFrame(st: State): void {
   api("/api/play", { source: saved?.source ?? "wave" }).catch(() => {});
 }
 
+// entityLink — кликабельное имя артиста/альбома. stopPropagation обязателен
+// для строк очереди: там весь <li> уже несёт свой click (переход по
+// индексу очереди), и клик по имени внутри не должен запускать оба.
+function entityLink(kind: "artists" | "albums", id: string, text: string): HTMLSpanElement {
+  const span = document.createElement("span");
+  span.className = "entityLink";
+  span.textContent = text;
+  span.addEventListener("click", (e) => {
+    e.stopPropagation();
+    openEntityCard(kind, id, text).catch(() => {});
+  });
+  return span;
+}
+
 // --- отрисовка ---
 
 function render(st: State): void {
@@ -386,7 +400,18 @@ function render(st: State): void {
   // массиве состояния, а не только на верхнем st.queue.
   const queue = st.queue ?? [];
   $("title").textContent = t ? t.title : "—";
-  $("artist").textContent = t ? (t.artists ?? []).join(", ") : "";
+  const artistWrap = $("artist");
+  artistWrap.innerHTML = "";
+  (t?.artists ?? []).forEach((name, i) => {
+    if (i > 0) artistWrap.append(", ");
+    const id = t?.artistIds?.[i];
+    artistWrap.append(id ? entityLink("artists", id, name) : document.createTextNode(name));
+  });
+  const albumWrap = $("album");
+  albumWrap.innerHTML = "";
+  if (t?.album) {
+    albumWrap.append(t.albumId ? entityLink("albums", t.albumId, t.album) : document.createTextNode(t.album));
+  }
   // Пустому src браузер рисует иконку битой картинки — в пустом состоянии
   // прячем обложку целиком.
   const coverEl = $("cover") as HTMLImageElement;
@@ -456,7 +481,12 @@ function render(st: State): void {
     titleEl.textContent = track.title;
     const artistEl = document.createElement("span");
     artistEl.className = "a";
-    artistEl.textContent = " — " + (track.artists ?? []).join(", ");
+    artistEl.append(" — ");
+    (track.artists ?? []).forEach((name, ai) => {
+      if (ai > 0) artistEl.append(", ");
+      const id = track.artistIds?.[ai];
+      artistEl.append(id ? entityLink("artists", id, name) : document.createTextNode(name));
+    });
     name.append(titleEl, artistEl);
     const dur = document.createElement("span");
     dur.className = "dur";
@@ -592,6 +622,7 @@ $("btnLists").addEventListener("click", async () => {
   const res = await fetch("/api/playlists");
   if (!res.ok) { showTransientError(await errorText(res)); return; }
   const lists = await res.json();
+  $("cardHeader").classList.add("hidden");
   listsEl.innerHTML = "";
   for (const pl of lists) {
     const li = document.createElement("li");
@@ -617,8 +648,45 @@ $("btnLists").addEventListener("click", async () => {
 
 function showQueue(): void {
   listsEl.classList.add("hidden");
+  $("cardHeader").classList.add("hidden");
   listEl.classList.remove("hidden");
 }
+
+// openEntityCard — карточка артиста/альбома поверх той же панели #lists,
+// что уже рисует список плейлистов. Открытие карточки не трогает
+// воспроизведение: очередь меняется только явным кликом по треку внутри.
+async function openEntityCard(kind: "artists" | "albums", id: string, title: string): Promise<void> {
+  const res = await fetch(`/api/${kind}/${id}/tracks`);
+  if (!res.ok) { showTransientError(await errorText(res)); return; }
+  const tracks = await res.json() as Track[];
+  listsEl.innerHTML = "";
+  tracks.forEach((track, i) => {
+    const li = document.createElement("li");
+    const name = document.createElement("span");
+    name.className = "name";
+    const titleEl = document.createElement("span");
+    titleEl.className = "t";
+    titleEl.textContent = track.title;
+    name.append(titleEl);
+    const dur = document.createElement("span");
+    dur.className = "dur";
+    dur.textContent = fmtTime(track.duration);
+    li.append(name, dur);
+    li.addEventListener("click", () => {
+      // Список от кликнутого трека и до конца — воспроизведение
+      // продолжается дальше по карточке в том же порядке.
+      api("/api/play", { source: "tracks", tracks: tracks.slice(i) }).catch(() => {});
+      showQueue();
+    });
+    listsEl.appendChild(li);
+  });
+  $("cardTitle").textContent = title;
+  $("cardHeader").classList.remove("hidden");
+  listEl.classList.add("hidden");
+  listsEl.classList.remove("hidden");
+}
+
+$("cardBack").addEventListener("click", showQueue);
 
 $("search").addEventListener("keydown", (e) => {
   if ((e as KeyboardEvent).key !== "Enter") return;
