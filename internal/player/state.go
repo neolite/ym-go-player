@@ -18,7 +18,9 @@ type Track struct {
 	ID        string   `json:"id"`
 	Title     string   `json:"title"`
 	Artists   []string `json:"artists"`
+	ArtistIDs []string `json:"artistIds"`
 	Album     string   `json:"album"`
+	AlbumID   string   `json:"albumId"`
 	CoverURL  string   `json:"coverUrl"`
 	Duration  int      `json:"duration"`
 	Available bool     `json:"available"`

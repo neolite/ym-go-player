@@ -16,9 +16,11 @@ type apiTrack struct {
 	DurationMs int    `json:"durationMs"`
 	CoverURI   string `json:"coverUri"`
 	Artists    []struct {
+		ID   any    `json:"id"`
 		Name string `json:"name"`
 	} `json:"artists"`
 	Albums []struct {
+		ID    any    `json:"id"`
 		Title string `json:"title"`
 	} `json:"albums"`
 }
@@ -26,18 +28,23 @@ type apiTrack struct {
 // toPlayer переводит форму API во внутреннюю модель.
 func (t apiTrack) toPlayer() player.Track {
 	artists := make([]string, 0, len(t.Artists))
+	artistIDs := make([]string, 0, len(t.Artists))
 	for _, a := range t.Artists {
 		artists = append(artists, a.Name)
+		artistIDs = append(artistIDs, idString(a.ID))
 	}
-	album := ""
+	album, albumID := "", ""
 	if len(t.Albums) > 0 {
 		album = t.Albums[0].Title
+		albumID = idString(t.Albums[0].ID)
 	}
 	return player.Track{
 		ID:        idString(t.ID),
 		Title:     t.Title,
 		Artists:   artists,
+		ArtistIDs: artistIDs,
 		Album:     album,
+		AlbumID:   albumID,
 		CoverURL:  coverURL(t.CoverURI),
 		Duration:  t.DurationMs / 1000,
 		Available: t.Available,

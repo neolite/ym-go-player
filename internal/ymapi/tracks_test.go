@@ -12,8 +12,8 @@ import (
 const tracksFixture = `{"result":[{
   "id":"12345","title":"Тестовый трек","available":true,"durationMs":183000,
   "coverUri":"avatars.example.net/get-music-content/1/%%",
-  "artists":[{"name":"Первый"},{"name":"Второй"}],
-  "albums":[{"title":"Альбом"}]
+  "artists":[{"id":111,"name":"Первый"},{"id":222,"name":"Второй"}],
+  "albums":[{"id":333,"title":"Альбом"}]
 }]}`
 
 const downloadInfoFixture = `{"result":[
@@ -65,6 +65,12 @@ func TestTracksParsesFixture(t *testing.T) {
 	}
 	if tr.CoverURL != "https://avatars.example.net/get-music-content/1/400x400" {
 		t.Fatalf("coverURL = %q", tr.CoverURL)
+	}
+	if len(tr.ArtistIDs) != 2 || tr.ArtistIDs[0] != "111" || tr.ArtistIDs[1] != "222" {
+		t.Fatalf("artistIDs = %v", tr.ArtistIDs)
+	}
+	if tr.AlbumID != "333" {
+		t.Fatalf("albumID = %q, want 333", tr.AlbumID)
 	}
 }
 
