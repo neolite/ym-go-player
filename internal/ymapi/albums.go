@@ -17,7 +17,7 @@ func (c *Client) AlbumTracks(ctx context.Context, albumID string) ([]player.Trac
 	if err := c.Get(ctx, "/albums/"+albumID+"/with-tracks", nil, &res); err != nil {
 		return nil, err
 	}
-	var out []player.Track
+	out := make([]player.Track, 0, 8)
 	for _, vol := range res.Volumes {
 		for _, t := range vol {
 			out = append(out, t.toPlayer())

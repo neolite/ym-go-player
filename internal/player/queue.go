@@ -43,6 +43,9 @@ func normalizeTracks(tracks []Track) []Track {
 		if t.Artists == nil {
 			t.Artists = []string{}
 		}
+		if t.ArtistIDs == nil {
+			t.ArtistIDs = []string{}
+		}
 		out[i] = t
 	}
 	return out
