@@ -5,3 +5,4 @@ web/node_modules/
 internal/httpapi/dist/*
 !internal/httpapi/dist/.gitkeep
 /musicapp
+.zcode/

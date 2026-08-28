@@ -453,3 +453,95 @@ func TestRedactToken(t *testing.T) {
 		})
 	}
 }
+
+func TestDeviceCodeEndpoint(t *testing.T) {
+	mockYandex := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(auth.DeviceCodeResponse{
+			DeviceCode:      "d123",
+			UserCode:        "U123",
+			VerificationURL: "https://oauth.yandex.ru/activate",
+			ExpiresIn:       300,
+			Interval:        5,
+		})
+	}))
+	defer mockYandex.Close()
+
+	a, mux := newTestAuth()
+	a.SetDeviceClient(&auth.DeviceClient{
+		HTTPClient:    mockYandex.Client(),
+		ClientID:      auth.YandexClientID,
+		ClientSecret:  auth.YandexClientSecret,
+		DeviceCodeURL: mockYandex.URL,
+		TokenURL:      mockYandex.URL,
+	})
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/auth/device/code", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200", rec.Code)
+	}
+
+	var res auth.DeviceCodeResponse
+	if err := json.NewDecoder(rec.Body).Decode(&res); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if res.DeviceCode != "d123" || res.UserCode != "U123" {
+		t.Fatalf("unexpected res: %+v", res)
+	}
+}
+
+func TestDevicePollEndpoint_PendingAndSuccess(t *testing.T) {
+	calls := 0
+	mockYandex := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		if calls == 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(auth.DeviceTokenResponse{
+				Error: "authorization_pending",
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(auth.DeviceTokenResponse{
+			AccessToken: "good",
+		})
+	}))
+	defer mockYandex.Close()
+
+	a, mux := newTestAuth()
+	a.SetDeviceClient(&auth.DeviceClient{
+		HTTPClient:    mockYandex.Client(),
+		ClientID:      auth.YandexClientID,
+		ClientSecret:  auth.YandexClientSecret,
+		DeviceCodeURL: mockYandex.URL,
+		TokenURL:      mockYandex.URL,
+	})
+
+	// Poll #1: pending
+	rec1 := httptest.NewRecorder()
+	req1 := httptest.NewRequest(http.MethodPost, "/api/auth/device/poll", strings.NewReader(`{"deviceCode":"d123"}`))
+	mux.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusAccepted {
+		t.Fatalf("poll 1 code = %d, want 202", rec1.Code)
+	}
+	var poll1Res map[string]any
+	_ = json.NewDecoder(rec1.Body).Decode(&poll1Res)
+	if poll1Res["pending"] != true {
+		t.Fatalf("poll 1 expected pending=true, got %+v", poll1Res)
+	}
+
+	// Poll #2: success
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodPost, "/api/auth/device/poll", strings.NewReader(`{"deviceCode":"d123"}`))
+	mux.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("poll 2 code = %d, want 200", rec2.Code)
+	}
+	st := decodeAuthState(t, rec2)
+	if !st.Authorized || st.Login != "tester" {
+		t.Fatalf("poll 2 unexpected state: %+v", st)
+	}
+}
+

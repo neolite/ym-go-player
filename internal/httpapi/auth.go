@@ -34,8 +34,9 @@ type VerifyFunc func(ctx context.Context, token string) (*ymapi.AccountStatus, e
 
 // Auth обслуживает роуты авторизации и хранит проверенный статус.
 type Auth struct {
-	store  auth.Store
-	verify VerifyFunc
+	store        auth.Store
+	verify       VerifyFunc
+	deviceClient *auth.DeviceClient
 
 	mu     sync.RWMutex
 	status *ymapi.AccountStatus
@@ -43,7 +44,11 @@ type Auth struct {
 
 // NewAuth собирает обработчик авторизации.
 func NewAuth(store auth.Store, verify VerifyFunc) *Auth {
-	return &Auth{store: store, verify: verify}
+	return &Auth{
+		store:        store,
+		verify:       verify,
+		deviceClient: auth.NewDeviceClient(),
+	}
 }
 
 // DefaultVerify — боевая проверка токена через API.
@@ -56,6 +61,8 @@ func (a *Auth) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/auth/status", a.handleStatus)
 	mux.HandleFunc("POST /api/auth/token", a.handleSetToken)
 	mux.HandleFunc("POST /api/auth/logout", a.handleLogout)
+	mux.HandleFunc("POST /api/auth/device/code", a.handleDeviceCode)
+	mux.HandleFunc("POST /api/auth/device/poll", a.handleDevicePoll)
 }
 
 // Token отдаёт сохранённый токен остальным обработчикам.
@@ -171,6 +178,88 @@ func (a *Auth) remember(st *ymapi.AccountStatus) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.status = st
+}
+
+// SetDeviceClient переопределяет клиент Device Flow (для тестов).
+func (a *Auth) SetDeviceClient(dc *auth.DeviceClient) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.deviceClient = dc
+}
+
+func (a *Auth) getDeviceClient() *auth.DeviceClient {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.deviceClient
+}
+
+func (a *Auth) handleDeviceCode(w http.ResponseWriter, r *http.Request) {
+	dc := a.getDeviceClient()
+	if dc == nil {
+		writeJSON(w, http.StatusInternalServerError, AuthState{Message: "Device Flow недоступен."})
+		return
+	}
+	res, err := dc.RequestCode(r.Context(), "")
+	if err != nil {
+		log.Printf("auth: ошибка запроса кода устройства: %v", err)
+		writeJSON(w, http.StatusInternalServerError, AuthState{Message: "Не удалось запросить код устройства."})
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (a *Auth) handleDevicePoll(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		DeviceCode string `json:"deviceCode"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, AuthState{Message: "Не удалось прочитать запрос."})
+		return
+	}
+	code := strings.TrimSpace(body.DeviceCode)
+	if code == "" {
+		writeJSON(w, http.StatusBadRequest, AuthState{Message: "Пустой deviceCode."})
+		return
+	}
+
+	dc := a.getDeviceClient()
+	if dc == nil {
+		writeJSON(w, http.StatusInternalServerError, AuthState{Message: "Device Flow недоступен."})
+		return
+	}
+
+	tokRes, err := dc.PollToken(r.Context(), code)
+	if err != nil {
+		if errors.Is(err, auth.ErrPending) {
+			writeJSON(w, http.StatusAccepted, map[string]any{
+				"pending": true,
+				"message": "Ожидание подтверждения пользователя.",
+			})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, AuthState{Message: err.Error()})
+		return
+	}
+
+	st, err := a.verify(r.Context(), tokRes.AccessToken)
+	if err != nil {
+		msg := "Токен не принят Яндексом."
+		if errors.Is(err, ymapi.ErrForbidden) {
+			msg = "Токен принят, но доступ запрещён — проверьте регион и подписку."
+		}
+		writeJSON(w, http.StatusUnauthorized, AuthState{Message: msg})
+		return
+	}
+
+	if err := a.store.Set(tokRes.AccessToken); err != nil {
+		log.Printf("auth: не удалось сохранить токен в хранилище: %s", redactToken(err, tokRes.AccessToken))
+		writeJSON(w, http.StatusInternalServerError, AuthState{
+			Message: "Не удалось сохранить токен в хранилище — проверьте доступ к связке ключей.",
+		})
+		return
+	}
+	a.remember(st)
+	writeJSON(w, http.StatusOK, stateFrom(st))
 }
 
 func stateFrom(st *ymapi.AccountStatus) AuthState {

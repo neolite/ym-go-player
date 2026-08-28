@@ -73,7 +73,7 @@
 
 - **Что это:** внутренний протокол Яндекса для синхронизации состояния воспроизведения между устройствами — «аналог Spotify Connect». Позволяет выступать «пультом ДУ» для официального приложения. ✅
 - **Транспорт:** долгоживущий WebSocket (JSON over WebSocket по описанию Music Assistant-плагина; в других реализациях — protobuf). Реконнекты с экспоненциальным backoff. ✅ / состояние (текущий трек, очередь, play/pause/seek/next/prev, очередь «Моя волна»). ✅
-- **Хендшейк:** ⚠️ (из вторичных описаний, **не** по исходнику)
+- **Хендшейк:** ⚠️ (из вторичных описаний, **не** по исходнику; позже подтверждён по исходникам MarshalX — см. [yandex-music-v3-device-flow-ynison.md](yandex-music-v3-device-flow-ynison.md))
   - Эндпоинт `wss://ynison.music.yandex.net` (и/или redirector-домен `ynison-redirector.music.yandex.net`); практикуется двухшаговая схема: сначала обращение к redirector, затем к выданному ynison-хосту.
   - Заголовки: `Ynison-Device-Id` (случайная строка ~16 символов), `Ynison-Device-Info` (JSON с `app_name`, `type`), `Sec-WebSocket-Protocol` с Bearer-токеном, OAuth-токен в `Authorization`.
 - **Реализации:**
