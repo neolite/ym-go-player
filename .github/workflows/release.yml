@@ -61,7 +61,7 @@ jobs:
         run: |
           mkdir -p dist
           go build -o dist/musicd ./cmd/musicd
-          go build -tags "desktop,production" -o dist/musicapp ./cmd/musicapp
+          go build -tags "desktop,production,webkit2_41" -o dist/musicapp ./cmd/musicapp
 
       - name: Build binaries (macOS)
         if: runner.os == 'macOS'
