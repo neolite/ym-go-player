@@ -1,0 +1,118 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: music-212-linux-amd64
+            asset_name: music-212-linux-amd64.tar.gz
+          - os: macos-latest
+            artifact_name: music-212-darwin-arm64
+            asset_name: music-212-darwin-arm64.tar.gz
+          - os: windows-latest
+            artifact_name: music-212-windows-amd64
+            asset_name: music-212-windows-amd64.zip
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          check-latest: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev libgl1-mesa-dev pkg-config
+
+      - name: Build web assets
+        shell: bash
+        run: |
+          mkdir -p internal/httpapi/dist
+          cd web
+          npm ci
+          npm run build
+
+      - name: Build binaries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist
+          go build -o dist/musicd ./cmd/musicd
+          go build -tags "desktop,production" -o dist/musicapp ./cmd/musicapp
+
+      - name: Build binaries (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p dist
+          go build -o dist/musicd ./cmd/musicd
+          CGO_LDFLAGS="-framework UniformTypeIdentifiers" go build -tags "desktop,production" -o dist/musicapp ./cmd/musicapp
+
+      - name: Build binaries (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          go build -o dist/musicd.exe ./cmd/musicd
+          go build -tags "desktop,production" -o dist/musicapp.exe ./cmd/musicapp
+
+      - name: Create archive (tar.gz)
+        if: runner.os != 'Windows'
+        run: |
+          cd dist
+          tar -czvf ../${{ matrix.asset_name }} musicd musicapp
+
+      - name: Create archive (zip)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cd dist
+          7z a ../${{ matrix.asset_name }} musicd.exe musicapp.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.asset_name }}
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
